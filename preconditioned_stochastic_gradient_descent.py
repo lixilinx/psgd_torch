@@ -155,7 +155,7 @@ def update_precond_scan(ql, qr, dX, dG, step=0.01):
     grad1_diag = torch.sum(A*A, dim=1) - torch.sum(Bt*Bt, dim=1)
     grad1_bias = A[:-1].mm(A[-1:].t()) - Bt[:-1].mm(Bt[-1:].t()) 
     grad1_bias = torch.reshape(grad1_bias, [-1])
-    grad1_bias = torch.cat([grad1_bias, torch.zeros(1)])  
+    grad1_bias = torch.cat([grad1_bias, grad1_bias.new_zeros(1)])  
 
     step1 = step/(max(torch.max(torch.abs(grad1_diag)), 
                       torch.max(torch.abs(grad1_bias))) + _tiny)
