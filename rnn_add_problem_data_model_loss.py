@@ -42,7 +42,9 @@ def train_criterion(Ws, x, y):
         net_in = torch.tensor(xt, dtype=torch.float)
         h = torch.tanh( torch.cat((net_in, h, ones), dim=1).mm(W1) )
         
-    net_out = torch.cat((h, ones), dim=1).mm(W2)
+    h_dropout = h*torch.bernoulli(0.9+0.1*torch.rand(h.shape))  
+        
+    net_out = torch.cat((h_dropout, ones), dim=1).mm(W2)
     mse = ((net_out - torch.tensor(y, dtype=torch.float))**2).mean()
     # return mean square error
     return mse
