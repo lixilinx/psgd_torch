@@ -188,6 +188,38 @@ def precond_grad_scan(ql, qr, Grad):
 
 
 
+###############################################################################
+def update_precond_scaw(Ql, qr, dX, dG, step=0.01):
+    """
+    update scaling-and-whitening preconditioner
+    """
+    max_l = torch.max(torch.abs(Ql))
+    max_r = torch.max(torch.abs(qr))
+    
+    rho = torch.sqrt(max_l/max_r)
+    Ql = Ql/rho
+    qr = rho*qr
+    
+    A = Ql.mm( dG*qr )
+    Bt = torch.trtrs(dX/qr, Ql.t(), upper=False)[0]
+    
+    grad1 = torch.triu(A.mm(A.t()) - Bt.mm(Bt.t()))
+    grad2 = torch.sum(A*A, dim=0, keepdim=True) - torch.sum(Bt*Bt, dim=0, keepdim=True)
+    
+    step1 = step/(torch.max(torch.abs(grad1)) + _tiny)
+    step2 = step/(torch.max(torch.abs(grad2)) + _tiny)
+        
+    return Ql - step1*grad1.mm(Ql), qr - step2*grad2*qr
+    
+
+def precond_grad_scaw(Ql, qr, Grad):
+    """
+    apply scaling-and-whitening preconditioner
+    """
+    return (Ql.t().mm(Ql)).mm(Grad*(qr*qr))
+
+
+
 ###############################################################################                        
 def update_precond_splu(L12, l3, U12, u3, dxs, dgs, step=0.01):
     """
