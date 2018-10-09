@@ -14,5 +14,5 @@ This package implements the Newton type and Fisher type preconditioned SGD metho
 #### References
 [1] Preconditioned stochastic gradient descent, https://arxiv.org/abs/1512.04202, 2015.  
 [2] Learning preconditioners on Lie groups, https://arxiv.org/abs/1809.10232, 2018.  
-[3] J. Martens, New insights and perspectives on the natural gradient method, https://arxiv.org/pdf/1503.05671.pdf, 2014.  
+[3] J. Martens, New insights and perspectives on the natural gradient method, https://arxiv.org/abs/1412.1193, 2014.  
 [4] Please check https://github.com/lixilinx/psgd_tf for more information.
