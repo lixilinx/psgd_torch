@@ -11,8 +11,16 @@ This package implements the Newton type and Fisher type preconditioned SGD metho
 *'demo_fisher_type_psgd_scaw.py'*: it demonstrates the usage of Fisher type method. Of course, we can change the preconditioner, and combine this method with momentum. We use the *empirical* Fisher in this example. Estimating the true Fisher will be more involved [3].    
 
 *'rnn_add_problem_data_model_loss.py'*: it defines a simple RNN learning benchmark problem to test our demos.
+
+*'mnist_autoencoder_data_model_loss.py'*: it defines an autoencoder benchmark problem for testing KFAC [5]. First order methods perform poorly on this one.       
 #### References
 [1] Preconditioned stochastic gradient descent, https://arxiv.org/abs/1512.04202, 2015.  
 [2] Learning preconditioners on Lie groups, https://arxiv.org/abs/1809.10232, 2018.  
 [3] J. Martens, New insights and perspectives on the natural gradient method, https://arxiv.org/abs/1412.1193, 2014.  
-[4] Please check https://github.com/lixilinx/psgd_tf for more information.
+[4] Please check https://github.com/lixilinx/psgd_tf for more information and comparisons with different methods.  
+[5] https://medium.com/@yaroslavvb/optimizing-deeper-networks-with-kfac-in-pytorch-4004adcba1b0
+
+#### Misc
+
+*One more comparison*: I compared several methods on the autoencoder benchmark [5], and the results as shown as below. KFAC uses batch size 10000, while other methods use batch size 1000. The Newton type method converges fast and generalized well.      
+![alt text](https://github.com/lixilinx/psgd_torch/blob/master/misc/mnist_autoencoder.jpg)
