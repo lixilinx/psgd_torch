@@ -22,5 +22,5 @@ This package implements the Newton type and Fisher type preconditioned SGD metho
 
 #### Misc
 
-*One more comparison*: I compared several methods on the autoencoder benchmark [5], and the results as shown as below. KFAC uses batch size 10000, while other methods use batch size 1000. The Newton type method converges fast and generalizes well.      
+*One more comparison*: I compared several methods on the autoencoder benchmark [5], and the results as shown as below. KFAC uses batch size 10000, while other methods use batch size 1000. KFAC's step size reduces to 0.1, otherwise, its test loss is too high. Second order methods converges faster and generalizes better. Actually, our Newton type method converges to test loss less than 10 even with code length 8!        
 ![alt text](https://github.com/lixilinx/psgd_torch/blob/master/misc/mnist_autoencoder.jpg)
