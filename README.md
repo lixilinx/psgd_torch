@@ -8,7 +8,9 @@ This package implements the Newton type and Fisher type preconditioned SGD metho
 
 *'demo_psgd_....py'*: these files demonstrate the usage of the Newton type method along with different preconditioners. It is possible to combine preconditioning with momentum, and we do not show it here.
 
-*'demo_fisher_type_psgd_scaw.py'*: it demonstrates the usage of Fisher type method. Of course, we can change the preconditioner, and combine this method with momentum. We use the *empirical* Fisher in this example. Estimating the true Fisher will be more involved [3].    
+*'demo_fisher_type_psgd_scaw.py'*: it demonstrates the usage of Fisher type method. Of course, we can change the preconditioner, and combine this method with momentum. We use the *empirical* Fisher in this example. Estimating the true Fisher will be more involved [3].
+
+*'demo_LeNet5.py'*: training the classic LeNet5 model with Newton type Kronecker product preconditioners. 
 
 *'rnn_add_problem_data_model_loss.py'*: it defines a simple RNN learning benchmark problem to test our demos.
 
@@ -22,5 +24,8 @@ This package implements the Newton type and Fisher type preconditioned SGD metho
 
 #### Misc
 
-*One more comparison*: I compared several methods on the autoencoder benchmark [5], and the results as shown as below. KFAC uses batch size 10000, while other methods use batch size 1000. KFAC's step size reduces to 0.1, otherwise, its test loss is too high. Second order methods converges faster and generalizes better. Actually, our Newton type method converges to test loss less than 10 even with code length 8!        
+*Comparison on autoencoder*: I compared several methods on the autoencoder benchmark [5], and the results as shown as below. KFAC uses batch size 10000, while other methods use batch size 1000. KFAC's step size reduces to 0.1, otherwise, its test loss is too high. Second order methods converge faster and generalizes better. Actually, our Newton type method converges to test loss less than 10 even with code length 8!        
 ![alt text](https://github.com/lixilinx/psgd_torch/blob/master/misc/mnist_autoencoder.jpg)
+
+*Comparison on LeNet5*: The Newton type method occasionally gets test classification error rate below 0.9%. Code reproducing KFAC's results are on https://github.com/lixilinx/psgd_torch/blob/master/misc/demo_LeNet5_KFAC.py
+![alt text](https://github.com/lixilinx/psgd_torch/blob/master/misc/mnist_lenet5.jpg)
