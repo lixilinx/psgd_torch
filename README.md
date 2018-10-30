@@ -23,9 +23,8 @@ This package implements the Newton type and Fisher type preconditioned SGD metho
 [5] https://medium.com/@yaroslavvb/optimizing-deeper-networks-with-kfac-in-pytorch-4004adcba1b0
 
 #### Misc
-
-*Comparison on autoencoder*: I compared several methods on the autoencoder benchmark [5], and the results as shown as below. KFAC uses batch size 10000, while other methods use batch size 1000. KFAC's step size reduces to 0.1, otherwise, its test loss is too high. Second order methods converge faster and generalizes better. Actually, our Newton type method converges to test loss less than 10 even with code length 8!        
-![alt text](https://github.com/lixilinx/psgd_torch/blob/master/misc/mnist_autoencoder.jpg)
-
-*Comparison on LeNet5*: The Newton type method occasionally gets test classification error rate below 0.9%. Code reproducing KFAC's results are on https://github.com/lixilinx/psgd_torch/blob/master/misc/demo_LeNet5_KFAC.py
+*Comparison on LeNet5*: We halve the step size every epoch. The Newton type method occasionally gets test classification error rate below 0.7%. Code reproducing KFAC's results are at ./misc/demo_LeNet5_KFAC.py.
 ![alt text](https://github.com/lixilinx/psgd_torch/blob/master/misc/mnist_lenet5.jpg)
+
+*Comparison on autoencoder*: I compared several methods on the autoencoder benchmark [5], and the results as shown as below. KFAC uses batch size 10000, while other methods use batch size 1000. KFAC's step size reduces to 0.1, otherwise, its test loss is too high.      
+![alt text](https://github.com/lixilinx/psgd_torch/blob/master/misc/mnist_autoencoder.jpg)
