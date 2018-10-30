@@ -3,16 +3,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torchvision import datasets, transforms
-""" I used Thrandis's KFAC from url 
-https://gist.github.com/Thrandis/9b3f75a130ec6c24a64117b7d9304c3f
-"""
 from kfac import KFAC
 
 train_loader = torch.utils.data.DataLoader(
         datasets.MNIST('../data', train=True, download=True,           
                        transform=transforms.Compose([                       
                                transforms.ToTensor()])),    
-                        batch_size=100, shuffle=True)
+                        batch_size=64, shuffle=True)
 test_loader = torch.utils.data.DataLoader(    
         datasets.MNIST('../data', train=False, transform=transforms.Compose([
                        transforms.ToTensor()])),    
@@ -28,11 +25,11 @@ class LeNet5(nn.Module):
         self.fc3 = nn.Linear(84, 10)
 
     def forward(self, x):
-        x = torch.tanh(F.max_pool2d(self.conv1(x), 2))
-        x = torch.tanh(F.max_pool2d(self.conv2(x), 2))
+        x = F.relu(F.max_pool2d(self.conv1(x), 2))
+        x = F.relu(F.max_pool2d(self.conv2(x), 2))
         x = x.view(-1, 256)
-        x = torch.tanh(self.fc1(x))
-        x = torch.tanh(self.fc2(x))
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
         x = self.fc3(x)
         return F.log_softmax(x, dim=1)
 
@@ -50,7 +47,7 @@ def test_loss(model, test_loader):
 
 
 model = LeNet5()
-preconditioner = KFAC(model, 0.001)
+preconditioner = KFAC(model, 0.002, alpha=0.05)
 lr0 = 0.01
 optimizer = optim.SGD(model.parameters(), lr=lr0)
 TrainLoss, TestLoss = [], []
@@ -61,17 +58,15 @@ for epoch in range(10):
         output = model(data)
         
         loss = F.nll_loss(output, target)
-        for para in model.parameters():
-            loss += 0.0002*torch.sum(para*para)
             
         TrainLoss.append(loss.item())
         loss.backward()
         preconditioner.step()
         optimizer.step()
-        if batch_idx % 10 == 0:
+        if batch_idx % 100 == 0:
             print('Epoch: {}; batch: {}; train loss: {}'.format(epoch, batch_idx, TrainLoss[-1]))
     
-    lr0 = (0.1**0.1)*lr0
+    lr0 = 0.5*lr0
     optimizer.param_groups[0]['lr'] = lr0
     TestLoss.append(test_loss(model, test_loader))
     print('Epoch: {}; best test loss: {}'.format(epoch, min(TestLoss)))
