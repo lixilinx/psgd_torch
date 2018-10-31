@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torchvision import datasets, transforms
-from kfac import KFAC
+from kfac import KFAC#download from https://gist.github.com/Thrandis/9b3f75a130ec6c24a64117b7d9304c3f
 
 train_loader = torch.utils.data.DataLoader(
         datasets.MNIST('../data', train=True, download=True,           
