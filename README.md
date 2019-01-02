@@ -2,7 +2,7 @@
 #### Overview
 This package implements the Newton type and Fisher type preconditioned SGD methods [1, 2]. The Fisher type method applies to stochastic learning where Fisher metric can be well defined, while the Newton type method applies to a much wider range of applications. We have implemented dense, diagonal, sparse LU decomposition, Kronecker product, scaling-and-normalization and scaling-and-whitening preconditioners. Many optimization methods are closely related to certain specific realizations of our methods, e.g., Adam-->(empirical) Fisher type + diagonal preconditioner + momentum, KFAC-->Fisher type + Kronecker product preconditioner, batch normalization-->scaling-and-normalization preconditioner, equilibrated SGD-->Newton type + diagonal preconditioner, etc. Please check [2] for further details.       
 #### About the code
-*'hello_psgd.py'*: please try it first to see whether the code works for you. We verified it on Pytorch 0.4. 
+*'hello_psgd.py'*: please try it first to see whether the code works for you. 
 
 *'preconditioned_stochastic_gradient_descent.py'*: it defines the preconditioners and preconditioned gradients we have developed. 
 
@@ -14,17 +14,20 @@ This package implements the Newton type and Fisher type preconditioned SGD metho
 
 *'rnn_add_problem_data_model_loss.py'*: it defines a simple RNN learning benchmark problem to test our demos.
 
-*'mnist_autoencoder_data_model_loss.py'*: it defines an autoencoder benchmark problem for testing KFAC [5]. First order methods perform poorly on this one.       
+*'mnist_autoencoder_data_model_loss.py'*: it defines an autoencoder benchmark problem for testing KFAC [5]. First order methods perform poorly on this one.  
+#### A quick benchmark on the MNIST dataset with LeNet5
+Folder ./LeNet5 provides the code to do a quick benchmark on the classic MNIST handwritten digit recognition task with the classic LeNet5. With ten runs for each method, one set of typical (mean, std) test classification error rate numbers looks like:
+
+METHOD | (MEAN, STD)%
+------------ | -------------
+Momentum | (96, 7)
+Adam | (88, 7)
+KFAC | (84, 7)
+Fish type preconditioner | (86, 5)
+Newton type preconditioner | (74, 6)
 #### References
 [1] Preconditioned stochastic gradient descent, https://arxiv.org/abs/1512.04202, 2015.  
-[2] Learning preconditioners on Lie groups, https://arxiv.org/abs/1809.10232, 2018.  
+[2] Preconditioner on matrix Lie group for SGD, https://arxiv.org/abs/1809.10232, 2018.  
 [3] J. Martens, New insights and perspectives on the natural gradient method, https://arxiv.org/abs/1412.1193, 2014.  
 [4] Please check https://github.com/lixilinx/psgd_tf for more information and comparisons with different methods.  
 [5] https://medium.com/@yaroslavvb/optimizing-deeper-networks-with-kfac-in-pytorch-4004adcba1b0
-
-#### Misc
-*Comparison on LeNet5*: We halve the step size every epoch. The Newton type method occasionally gets test classification error rate below 0.7%. Code reproducing KFAC's results are at ./misc/demo_LeNet5_KFAC.py.
-![alt text](https://github.com/lixilinx/psgd_torch/blob/master/misc/mnist_lenet5.jpg)
-
-*Comparison on autoencoder*: I compared several methods on the autoencoder benchmark [5], and the results as shown as below. KFAC uses batch size 10000, while other methods use batch size 1000. KFAC's step size reduces to 0.1, otherwise, its test loss is too high.      
-![alt text](https://github.com/lixilinx/psgd_torch/blob/master/misc/mnist_autoencoder.jpg)
