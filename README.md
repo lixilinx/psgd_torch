@@ -20,11 +20,11 @@ Folder ./LeNet5 provides the code to do a quick benchmark on the classic MNIST h
 
 METHOD | (MEAN, STD)%
 ------------ | -------------
-Momentum | (96, 7)
-Adam | (88, 7)
-KFAC | (84, 7)
-Fish type preconditioner | (86, 5)
-Newton type preconditioner | (74, 6)
+Momentum | (0.96, 0.07)
+Adam | (0.88, 0.07)
+KFAC | (0.84, 0.07)
+Fish type preconditioner | (0.86, 0.05)
+Newton type preconditioner | (0.74, 0.06)
 #### References
 [1] Preconditioned stochastic gradient descent, https://arxiv.org/abs/1512.04202, 2015.  
 [2] Preconditioner on matrix Lie group for SGD, https://arxiv.org/abs/1809.10232, 2018.  
