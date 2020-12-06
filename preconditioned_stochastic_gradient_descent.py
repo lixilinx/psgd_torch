@@ -21,7 +21,7 @@ def update_precond_dense(Q, dxs, dgs, step=0.01):
     dg = torch.cat([torch.reshape(g, [-1, 1]) for g in dgs])
     
     a = Q.mm(dg)
-    b = torch.trtrs(dx, Q.t(), upper=False)[0]
+    b = torch.triangular_solve(dx, Q.t(), upper=False)[0]
 
     grad = torch.triu(a.mm(a.t()) - b.mm(b.t()))
     step0 = step/(grad.abs().max() + _tiny)        
@@ -91,7 +91,7 @@ def update_precond_kron(Ql, Qr, dX, dG, step=0.01):
     Qr = rho*Qr
     
     A = Ql.mm( dG.mm( Qr.t() ) )
-    Bt = torch.trtrs((torch.trtrs(dX.t(), Qr.t(), upper=False))[0].t(), 
+    Bt = torch.triangular_solve((torch.triangular_solve(dX.t(), Qr.t(), upper=False))[0].t(), 
                      Ql.t(), upper=False)[0]
     
     grad1 = torch.triu(A.mm(A.t()) - Bt.mm(Bt.t()))
@@ -110,10 +110,12 @@ def precond_grad_kron(Ql, Qr, Grad):
     Qr: (right side) Cholesky factor of preconditioner
     Grad: (matrix) gradient
     """
-    if Grad.shape[0] > Grad.shape[1]:
-        return Ql.t().mm( Ql.mm( Grad.mm( Qr.t().mm(Qr) ) ) )
-    else:
-        return (((Ql.t().mm(Ql)).mm(Grad)).mm(Qr.t())).mm(Qr)
+    #if Grad.shape[0] > Grad.shape[1]:
+    #    return Ql.t().mm( Ql.mm( Grad.mm( Qr.t().mm(Qr) ) ) )
+    #else:
+    #    return (((Ql.t().mm(Ql)).mm(Grad)).mm(Qr.t())).mm(Qr)
+    # replace it with chain matrix multiplication by lixilinx on Dec. 5, 2020
+    return torch.chain_matmul(Ql.t(), Ql, Grad, Qr.t(), Qr)
     
 
 
@@ -201,7 +203,7 @@ def update_precond_scaw(Ql, qr, dX, dG, step=0.01):
     qr = rho*qr
     
     A = Ql.mm( dG*qr )
-    Bt = torch.trtrs(dX/qr, Ql.t(), upper=False)[0]
+    Bt = torch.triangular_solve(dX/qr, Ql.t(), upper=False)[0]
     
     grad1 = torch.triu(A.mm(A.t()) - Bt.mm(Bt.t()))
     grad2 = torch.sum(A*A, dim=0, keepdim=True) - torch.sum(Bt*Bt, dim=0, keepdim=True)
@@ -216,7 +218,9 @@ def precond_grad_scaw(Ql, qr, Grad):
     """
     apply scaling-and-whitening preconditioner
     """
-    return (Ql.t().mm(Ql)).mm(Grad*(qr*qr))
+    #return (Ql.t().mm(Ql)).mm(Grad*(qr*qr))
+    # replace with chain product on Dec, 5, 2020 by lixilinx
+    return torch.chain_matmul(Ql.t(), Ql, Grad*(qr*qr))
 
 
 
@@ -259,11 +263,11 @@ def update_precond_splu(L12, l3, U12, u3, dxs, dgs, step=0.01):
     Qg1 = L1.mm(Ug1)
     Qg2 = L2.mm(Ug1) + l3*Ug2
     # inv(U^T)*dx
-    iUtx1 = torch.trtrs(dx[:r], U1.t(), upper=False)[0]
+    iUtx1 = torch.triangular_solve(dx[:r], U1.t(), upper=False)[0]
     iUtx2 = (dx[r:] - U2.t().mm(iUtx1))/u3
     # inv(Q^T)*dx
     iQtx2 = iUtx2/l3
-    iQtx1 = torch.trtrs(iUtx1 - L2.t().mm(iQtx2), L1.t(), upper=True)[0]
+    iQtx1 = torch.triangular_solve(iUtx1 - L2.t().mm(iQtx2), L1.t(), upper=True)[0]
     # L^T*Q*dg
     LtQg1 = L1.t().mm(Qg1) + L2.t().mm(Qg2)
     LtQg2 = l3*Qg2
@@ -271,11 +275,11 @@ def update_precond_splu(L12, l3, U12, u3, dxs, dgs, step=0.01):
     Pg1 = U1.t().mm(LtQg1)
     Pg2 = U2.t().mm(LtQg1) + u3*LtQg2
     # inv(L)*inv(Q^T)*dx
-    iLiQtx1 = torch.trtrs(iQtx1, L1, upper=False)[0]
+    iLiQtx1 = torch.triangular_solve(iQtx1, L1, upper=False)[0]
     iLiQtx2 = (iQtx2 - L2.mm(iLiQtx1))/l3
     # inv(P)*dx
     iPx2 = iLiQtx2/u3
-    iPx1 = torch.trtrs(iLiQtx1 - U2.mm(iPx2), U1, upper=True)[0]
+    iPx1 = torch.triangular_solve(iLiQtx1 - U2.mm(iPx2), U1, upper=True)[0]
     
     # update L
     grad1 = Qg1.mm(Qg1.t()) - iQtx1.mm(iQtx1.t())
