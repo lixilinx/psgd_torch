@@ -13,7 +13,7 @@ train_loader = torch.utils.data.DataLoader(
 test_loader = torch.utils.data.DataLoader(    
         datasets.MNIST('../data', train=False, transform=transforms.Compose([
                        transforms.ToTensor()])),    
-                        batch_size=1000, shuffle=True)
+                        batch_size=1000, shuffle=False)
 
 LeNet5_vars = [0.1*torch.randn(1*5*5+1,  6),
                0.1*torch.randn(6*5*5+1,  16),
