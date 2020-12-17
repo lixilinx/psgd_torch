@@ -1,27 +1,30 @@
-# -*- coding: utf-8 -*-
 """Created in May, 2018
 Pytorch functions for preconditioned SGD
-@author: XILIN LI
-"""
-import torch
+@author: XILIN LI, lixilinx@gmail.com
 
-_tiny = 1.2e-38   # to avoid dividing by zero
+Updated in Dec, 2020: 
+Wrapped Kronecker product preconditioner for easy use: the code will select the proper Kronecker product  
+preconditioner based on the formats of input left and right preconditioners
+"""
+
+import torch
 
 
 ###############################################################################
-def update_precond_dense(Q, dxs, dgs, step=0.01):
+def update_precond_dense(Q, dxs, dgs, step=0.01, _tiny=1.2e-38):
     """
     update dense preconditioner P = Q^T*Q
     Q: Cholesky factor of preconditioner with positive diagonal entries 
     dxs: list of perturbations of parameters
     dgs: list of perturbations of gradients
-    step: normalized step size in [0, 1]
+    step: update step size normalized to range [0, 1] 
+    _tiny: an offset to avoid division by zero 
     """
     dx = torch.cat([torch.reshape(x, [-1, 1]) for x in dxs])
     dg = torch.cat([torch.reshape(g, [-1, 1]) for g in dgs])
     
     a = Q.mm(dg)
-    b = torch.triangular_solve(dx, Q.t(), upper=False)[0]
+    b = torch.triangular_solve(dx, Q, upper=True, transpose=True)[0]
 
     grad = torch.triu(a.mm(a.t()) - b.mm(b.t()))
     step0 = step/(grad.abs().max() + _tiny)        
@@ -49,50 +52,101 @@ def precond_grad_dense(Q, grads):
     return pre_grads
 
 
+###############################################################################
+def update_precond_kron(Ql, Qr, dX, dG, step=0.01, _tiny=1.2e-38):
+    """
+    Update Kronecker product preconditioner P = kron_prod(Qr^T*Qr, Ql^T*Ql)
+    Either Ql or Qr can be sparse, and the code can choose the right update rule.
+    dX: perturbation of (matrix) parameter
+    dG: perturbation of (matrix) gradient
+    step: update step size
+    _tiny: an offset to avoid division by zero 
+    """
+    m, n = Ql.shape
+    p, q = Qr.shape
+    if m==n: # left is dense
+        if p==q: #(dense, dense) format
+            return update_precond_dense_dense(Ql, Qr, dX, dG, step, _tiny)
+        elif p==2: # (dense, normalization) format
+            return update_precond_norm_dense(Qr, Ql, dX.t(), dG.t(), step, _tiny)[::-1]
+        elif p==1: # (dense, scaling) format
+            return update_precond_dense_scale(Ql, Qr, dX, dG, step, _tiny)
+        else:
+            raise Exception('Unknown Kronecker product preconditioner')
+    elif m==2: # left is normalization
+        if p==q: # (normalization, dense) format
+            return update_precond_norm_dense(Ql, Qr, dX, dG, step, _tiny)
+        elif p==1: # (normalization, scaling) format
+            return update_precond_norm_scale(Ql, Qr, dX, dG, step, _tiny)
+        else:
+            raise Exception('Unknown Kronecker product preconditioner')
+    elif m==1: # left is scaling
+        if p==q: # (scaling, dense) format
+            return update_precond_dense_scale(Qr, Ql, dX.t(), dG.t(), step, _tiny)[::-1]
+        elif p==2: # (scaling, normalization) format
+            return update_precond_norm_scale(Qr, Ql, dX.t(), dG.t(), step, _tiny)[::-1]
+        else:
+            raise Exception('Unknown Kronecker product preconditioner')
+    else:
+        raise Exception('Unknown Kronecker product preconditioner')
+ 
+       
+def precond_grad_kron(Ql, Qr, Grad):
+    """
+    return preconditioned gradient using Kronecker product preconditioner P = kron_prod(Qr^T*Qr, Ql^T*Ql)
+    Either Ql or Qr can be sparse, and the code can choose the right way to precondition the gradient
+    Grad: (matrix) gradient
+    """
+    m, n = Ql.shape
+    p, q = Qr.shape
+    if m==n: # left is dense
+        if p==q: #(dense, dense) format
+            return precond_grad_dense_dense(Ql, Qr, Grad)
+        elif p==2: # (dense, normalization) format
+            return precond_grad_norm_dense(Qr, Ql, Grad.t()).t()
+        elif p==1: # (dense, scaling) format
+            return precond_grad_dense_scale(Ql, Qr, Grad)
+        else:
+            raise Exception('Unknown Kronecker product preconditioner')
+    elif m==2: # left is normalization
+        if p==q: # (normalization, dense) format
+            return precond_grad_norm_dense(Ql, Qr, Grad)
+        elif p==1: # (normalization, scaling) format
+            return precond_grad_norm_scale(Ql, Qr, Grad)
+        else:
+            raise Exception('Unknown Kronecker product preconditioner')
+    elif m==1: # left is scaling
+        if p==q: # (scaling, dense) format
+            return precond_grad_dense_scale(Qr, Ql, Grad.t()).t()
+        elif p==2: # (scaling, normalization) format
+            return precond_grad_norm_scale(Qr, Ql, Grad.t()).t()
+        else:
+            raise Exception('Unknown Kronecker product preconditioner')
+    else:
+        raise Exception('Unknown Kronecker product preconditioner')
+        
 
 ###############################################################################
-def update_precond_diag(Q, dx, dg, step=0.01):
-    """
-    update diagonal preconditioner
-    Q: diagonal preconditioner
-    dx: perturbation of parameter
-    dg: perturbation of gradient
-    step: normalized step size
-    """
-    grad = torch.sign(torch.abs(Q*dg) - torch.abs(dx/Q))
-    return Q - step*grad*Q
-
-
-def precond_grad_diag(Q, grad):
-    """
-    return preconditioned gradient using a diagonal preconditioner
-    Q: diagonal preconditioner
-    grad: gradient
-    """
-    return Q*Q*grad
-
-
-
-###############################################################################
-def update_precond_kron(Ql, Qr, dX, dG, step=0.01):
+def update_precond_dense_dense(Ql, Qr, dX, dG, step=0.01, _tiny=1.2e-38):
     """
     update Kronecker product preconditioner P = kron_prod(Qr^T*Qr, Ql^T*Ql)
     Ql: (left side) Cholesky factor of preconditioner with positive diagonal entries
     Qr: (right side) Cholesky factor of preconditioner with positive diagonal entries
     dX: perturbation of (matrix) parameter
     dG: perturbation of (matrix) gradient
-    step: normalized step size in range [0, 1] 
+    step: update step size normalized to range [0, 1] 
+    _tiny: an offset to avoid division by zero 
     """
-    max_l = torch.max(torch.abs(Ql))
-    max_r = torch.max(torch.abs(Qr))
+    max_l = torch.max(torch.diag(Ql))
+    max_r = torch.max(torch.diag(Qr))
     
     rho = torch.sqrt(max_l/max_r)
     Ql = Ql/rho
     Qr = rho*Qr
     
     A = Ql.mm( dG.mm( Qr.t() ) )
-    Bt = torch.triangular_solve((torch.triangular_solve(dX.t(), Qr.t(), upper=False))[0].t(), 
-                     Ql.t(), upper=False)[0]
+    Bt = torch.triangular_solve((torch.triangular_solve(dX.t(), Qr, upper=True, transpose=True))[0].t(), 
+                     Ql, upper=True, transpose=True)[0]
     
     grad1 = torch.triu(A.mm(A.t()) - Bt.mm(Bt.t()))
     grad2 = torch.triu(A.t().mm(A) - Bt.t().mm(Bt))
@@ -103,43 +157,100 @@ def update_precond_kron(Ql, Qr, dX, dG, step=0.01):
     return Ql - step1*grad1.mm(Ql), Qr - step2*grad2.mm(Qr)
     
 
-def precond_grad_kron(Ql, Qr, Grad):
+def precond_grad_dense_dense(Ql, Qr, Grad):
     """
     return preconditioned gradient using Kronecker product preconditioner
     Ql: (left side) Cholesky factor of preconditioner
     Qr: (right side) Cholesky factor of preconditioner
     Grad: (matrix) gradient
     """
-    #if Grad.shape[0] > Grad.shape[1]:
-    #    return Ql.t().mm( Ql.mm( Grad.mm( Qr.t().mm(Qr) ) ) )
-    #else:
-    #    return (((Ql.t().mm(Ql)).mm(Grad)).mm(Qr.t())).mm(Qr)
-    # replace it with chain matrix multiplication by lixilinx on Dec. 5, 2020
     return torch.chain_matmul(Ql.t(), Ql, Grad, Qr.t(), Qr)
     
 
+###############################################################################
+# (normalization, dense) format Kronecker product preconditioner
+def update_precond_norm_dense(ql, Qr, dX, dG, step=0.01, _tiny=1.2e-38):
+    """
+    update (normalization, dense) Kronecker product preconditioner P = kron_prod(Qr^T*Qr, Ql^T*Ql), where
+    dX and dG have shape (M, N)
+    ql has shape (2, M)
+    Qr has shape (N, N)
+    ql[0] is the diagonal part of Ql
+    ql[1,0:-1] is the last column of Ql, excluding the last entry
+    dX is perturbation of (matrix) parameter
+    dG is perturbation of (matrix) gradient
+    step: update step size normalized to range [0, 1] 
+    _tiny: an offset to avoid division by zero  
+    """
+    # make sure that Ql and Qr have similar dynamic range
+    max_l = torch.max(ql[0])
+    max_r = torch.max(torch.diag(Qr))  
+    rho = torch.sqrt(max_l/max_r)
+    ql = ql/rho
+    Qr = rho*Qr
+    
+    # refer to https://arxiv.org/abs/1512.04202 for details
+    A = ql[0:1].t()*dG
+    A = A + ql[1:].t().mm( dG[-1:] ) # Ql*dG 
+    A = A.mm(Qr.t())
+    
+    Bt = (1.0/ql[0:1].t())*dX
+    Bt[-1:] = Bt[-1:] - (ql[1:]/(ql[0:1]*ql[0,-1])).mm(dX)
+    Bt = torch.triangular_solve(Bt.t(), Qr, upper=True, transpose=True)[0].t()
+    
+    grad1_diag = torch.sum(A*A, dim=1) - torch.sum(Bt*Bt, dim=1)
+    grad1_bias = A[:-1].mm(A[-1:].t()) - Bt[:-1].mm(Bt[-1:].t()) 
+    grad1_bias = torch.cat([torch.squeeze(grad1_bias), grad1_bias.new_zeros(1)])  
+
+    step1 = step/(max(torch.max(torch.abs(grad1_diag)), 
+                      torch.max(torch.abs(grad1_bias))) + _tiny)
+    new_ql0 = ql[0] - step1*grad1_diag*ql[0]
+    new_ql1 = ql[1] - step1*(grad1_diag*ql[1] + ql[0,-1]*grad1_bias)
+    
+    grad2 = torch.triu(A.t().mm(A) - Bt.t().mm(Bt))
+    step2 = step/(torch.max(torch.abs(grad2)) + _tiny)
+    
+    return torch.stack((new_ql0, new_ql1)), Qr - step2*grad2.mm(Qr)
+
+
+def precond_grad_norm_dense(ql, Qr, Grad):
+    """
+    return preconditioned gradient using (normalization, dense) Kronecker product preconditioner 
+    Suppose Grad has shape (M, N)
+    ql[0] is the diagonal part of Ql
+    ql[1, 0:-1] is the last column of Ql, excluding the last entry
+    Qr: shape (N, N), Cholesky factor of right preconditioner
+    Grad: (matrix) gradient
+    """
+    preG = ql[0:1].t()*Grad
+    preG = preG + ql[1:].t().mm(Grad[-1:]) # Ql*Grad 
+    preG = torch.chain_matmul(preG, Qr.t(), Qr)
+    add_last_row = ql[1:].mm(preG) # use it to modify the last row
+    preG = ql[0:1].t()*preG
+    preG[-1:] = preG[-1:] + add_last_row
+    
+    return preG
+
 
 ###############################################################################
-# SCAN preconditioner is super sparse, sparser than a diagonal preconditioner! 
-# For an (M, N) matrix, it only requires 2*M+N-1 parameters to represent it
-# Make sure that input feature vector is augmented by 1 at the end, and the affine transformation is given by
-#               y = x*(affine transformation matrix)
-#
-def update_precond_scan(ql, qr, dX, dG, step=0.01):
+# (normalization, scaling) Kronecker product preconditioner 
+# the left one is a normalization preconditioner; the right one is a scaling preconditioner
+def update_precond_norm_scale(ql, qr, dX, dG, step=0.01, _tiny=1.2e-38):
     """
-    update SCaling-And-Normalization (SCAN) preconditioner P = kron_prod(Qr^T*Qr, Ql^T*Ql), where
+    update (normalization, scaling) preconditioner P = kron_prod(Qr^T*Qr, Ql^T*Ql), where
     dX and dG have shape (M, N)
     ql has shape (2, M)
     qr has shape (1, N)
     ql[0] is the diagonal part of Ql
-    ql[1,0:-1] is the last column of Ql, excluding the last entry
+    ql[1, 0:-1] is the last column of Ql, excluding the last entry
     qr is the diagonal part of Qr
     dX is perturbation of (matrix) parameter
     dG is perturbation of (matrix) gradient
-    step is the normalized step size in natrual gradient descent  
+    step: update step size
+    _tiny: an offset to avoid division by zero  
     """
-    # diagonal loading is removed, here we just want to make sure that Ql and Qr have similar dynamic range
-    max_l = torch.max(torch.abs(ql))
+    # make sure that Ql and Qr have similar dynamic range
+    max_l = torch.max(ql[0])
     max_r = torch.max(qr) # qr always is positive
     rho = torch.sqrt(max_l/max_r)
     ql = ql/rho
@@ -156,8 +267,7 @@ def update_precond_scan(ql, qr, dX, dG, step=0.01):
     
     grad1_diag = torch.sum(A*A, dim=1) - torch.sum(Bt*Bt, dim=1)
     grad1_bias = A[:-1].mm(A[-1:].t()) - Bt[:-1].mm(Bt[-1:].t()) 
-    grad1_bias = torch.reshape(grad1_bias, [-1])
-    grad1_bias = torch.cat([grad1_bias, grad1_bias.new_zeros(1)])  
+    grad1_bias = torch.cat([torch.squeeze(grad1_bias), grad1_bias.new_zeros(1)])  
 
     step1 = step/(max(torch.max(torch.abs(grad1_diag)), 
                       torch.max(torch.abs(grad1_bias))) + _tiny)
@@ -166,17 +276,19 @@ def update_precond_scan(ql, qr, dX, dG, step=0.01):
     
     grad2 = torch.sum(A*A, dim=0, keepdim=True) - torch.sum(Bt*Bt, dim=0, keepdim=True)
     step2 = step/(torch.max(torch.abs(grad2)) + _tiny)
-    new_qr = qr - step2*grad2*qr
     
-    return torch.stack((new_ql0, new_ql1)), new_qr
+    return torch.stack((new_ql0, new_ql1)), qr - step2*grad2*qr
 
 
-def precond_grad_scan(ql, qr, Grad):
+def precond_grad_norm_scale(ql, qr, Grad):
     """
-    return preconditioned gradient using SCaling-And-Normalization (SCAN) preconditioner
+    return preconditioned gradient using (normalization, scaling) Kronecker product preconditioner
     Suppose Grad has shape (M, N)
-    ql: shape (2, M), defines a matrix has the same form as that for input feature normalization 
-    qr: shape (1, N), defines a diagonal matrix for output feature scaling
+    ql has shape (2, M) 
+    qr has shape (1, N) 
+    ql[0] is the diagonal part of Ql
+    ql[1, 0:-1] is the last column of Ql, excluding the last entry
+    qr is the diagonal part of Qr
     Grad: (matrix) gradient
     """
     preG = ql[0:1].t()*Grad
@@ -189,21 +301,28 @@ def precond_grad_scan(ql, qr, Grad):
     return preG
 
 
-
 ###############################################################################
-def update_precond_scaw(Ql, qr, dX, dG, step=0.01):
+def update_precond_dense_scale(Ql, qr, dX, dG, step=0.01, _tiny=1.2e-38):
     """
-    update scaling-and-whitening preconditioner
+    update (dense, scaling) preconditioner P = kron_prod(Qr^T*Qr, Ql^T*Ql), where
+    dX and dG have shape (M, N)
+    Ql has shape (M, M)
+    qr has shape (1, N)
+    qr is the diagonal part of Qr
+    dX is perturbation of (matrix) parameter
+    dG is perturbation of (matrix) gradient
+    step: update step size
+    _tiny: an offset to avoid division by zero 
     """
-    max_l = torch.max(torch.abs(Ql))
-    max_r = torch.max(torch.abs(qr))
+    max_l = torch.max(torch.diag(Ql))
+    max_r = torch.max(qr)
     
     rho = torch.sqrt(max_l/max_r)
     Ql = Ql/rho
     qr = rho*qr
     
     A = Ql.mm( dG*qr )
-    Bt = torch.triangular_solve(dX/qr, Ql.t(), upper=False)[0]
+    Bt = torch.triangular_solve(dX/qr, Ql, upper=True, transpose=True)[0]
     
     grad1 = torch.triu(A.mm(A.t()) - Bt.mm(Bt.t()))
     grad2 = torch.sum(A*A, dim=0, keepdim=True) - torch.sum(Bt*Bt, dim=0, keepdim=True)
@@ -214,18 +333,20 @@ def update_precond_scaw(Ql, qr, dX, dG, step=0.01):
     return Ql - step1*grad1.mm(Ql), qr - step2*grad2*qr
     
 
-def precond_grad_scaw(Ql, qr, Grad):
+def precond_grad_dense_scale(Ql, qr, Grad):
     """
-    apply scaling-and-whitening preconditioner
+    return preconditioned gradient using (dense, scaling) Kronecker product preconditioner
+    Suppose Grad has shape (M, N)
+    Ql: shape (M, M), (left side) Cholesky factor of preconditioner
+    qr: shape (1, N), defines a diagonal matrix for output feature scaling
+    Grad: (matrix) gradient
     """
-    #return (Ql.t().mm(Ql)).mm(Grad*(qr*qr))
-    # replace with chain product on Dec, 5, 2020 by lixilinx
     return torch.chain_matmul(Ql.t(), Ql, Grad*(qr*qr))
 
 
 
 ###############################################################################                        
-def update_precond_splu(L12, l3, U12, u3, dxs, dgs, step=0.01):
+def update_precond_splu(L12, l3, U12, u3, dxs, dgs, step=0.01, _tiny=1.2e-38):
     """
     update sparse LU preconditioner P = Q^T*Q, where 
     Q = L*U,
@@ -236,17 +357,19 @@ def update_precond_splu(L12, l3, U12, u3, dxs, dgs, step=0.01):
     l3 and u3 are column vectors
     dxs: a list of random perturbation on parameters
     dgs: a list of resultant perturbation on gradients
-    step: step size
+    step: update step size normalized to range [0, 1] 
+    _tiny: an offset to avoid division by zero 
     """
     # make sure that L and U have similar dynamic range
-    max_l = max(torch.max(torch.abs(L12)), torch.max(l3))
-    max_u = max(torch.max(torch.abs(U12)), torch.max(u3))
+    max_l = max(torch.max(torch.diag(L12)), torch.max(l3))
+    max_u = max(torch.max(torch.diag(U12)), torch.max(u3))
     rho = torch.sqrt(max_l/max_u)
     L12 = L12/rho
     l3 = l3/rho
     U12 = rho*U12
     u3 = rho*u3
-    # extract blocks
+    
+    # extract the blocks
     r = U12.shape[0]
     L1 = L12[:r]
     L2 = L12[r:]
@@ -263,11 +386,11 @@ def update_precond_splu(L12, l3, U12, u3, dxs, dgs, step=0.01):
     Qg1 = L1.mm(Ug1)
     Qg2 = L2.mm(Ug1) + l3*Ug2
     # inv(U^T)*dx
-    iUtx1 = torch.triangular_solve(dx[:r], U1.t(), upper=False)[0]
+    iUtx1 = torch.triangular_solve(dx[:r], U1, upper=True, transpose=True)[0]
     iUtx2 = (dx[r:] - U2.t().mm(iUtx1))/u3
     # inv(Q^T)*dx
     iQtx2 = iUtx2/l3
-    iQtx1 = torch.triangular_solve(iUtx1 - L2.t().mm(iQtx2), L1.t(), upper=True)[0]
+    iQtx1 = torch.triangular_solve(iUtx1 - L2.t().mm(iQtx2), L1, upper=False, transpose=True)[0]
     # L^T*Q*dg
     LtQg1 = L1.t().mm(Qg1) + L2.t().mm(Qg2)
     LtQg2 = l3*Qg2
