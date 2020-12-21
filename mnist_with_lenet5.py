@@ -15,18 +15,18 @@ test_loader = torch.utils.data.DataLoader(
                        transforms.ToTensor()])),    
                         batch_size=1000, shuffle=False)
 
-LeNet5_vars = [0.1*torch.randn(1*5*5+1,  6),
-               0.1*torch.randn(6*5*5+1,  16),
-               0.1*torch.randn(16*4*4+1, 120),
-               0.1*torch.randn(120+1,    84),
-               0.1*torch.randn(84+1,     10),]
+LeNet5_vars = [0.1*torch.randn(6,   1*5*5+1), # (out_channels, in_channels*kH*kW + 1)
+               0.1*torch.randn(16,  6*5*5+1), # (out_channels, in_channels*kH*kW + 1)
+               0.1*torch.randn(16*4*4+1, 120),# (dim_input + 1, dim_output)
+               0.1*torch.randn(120+1,    84), # (dim_input + 1, dim_output)
+               0.1*torch.randn(84+1,     10),]# (dim_input + 1, dim_output)
 [W.requires_grad_(True) for W in LeNet5_vars]
 
 def LeNet5(x): 
     W1, W2, W3, W4, W5 = LeNet5_vars
-    x = F.conv2d(x, W1[:-1].view(6,1,5,5), bias=W1[-1])
+    x = F.conv2d(x, W1[:,:-1].view(6,1,5,5), bias=W1[:,-1])
     x = F.relu(F.max_pool2d(x, 2))
-    x = F.conv2d(x, W2[:-1].view(16,6,5,5), bias=W2[-1])
+    x = F.conv2d(x, W2[:,:-1].view(16,6,5,5), bias=W2[:,-1])
     x = F.relu(F.max_pool2d(x, 2))
     x = F.relu(x.view(-1, 16*4*4).mm(W3[:-1]) + W3[-1])
     x = F.relu(x.mm(W4[:-1]) + W4[-1])
