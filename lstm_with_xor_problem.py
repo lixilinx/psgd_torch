@@ -29,18 +29,18 @@ def generate_train_data( ):
 
 lstm_vars = [0.1*torch.randn(dim_in + 2*dim_hidden + 1, 4*dim_hidden),
              0.1*torch.randn(dim_hidden + 1, dim_out)]
+lstm_vars[0][-1, dim_hidden:2*dim_hidden] += 1.0 # forget gate with large bias to encourage long term memory 
+lstm_vars[0][:, 2*dim_hidden:3*dim_hidden] *= 2.0 # cause tanh(x)=2*sigmoid(2*x) - 1
 [W.requires_grad_(True) for W in lstm_vars]
 
 def lstm_net(xs): # one variation of LSTM. Note that there could be several variations 
     W1, W2 = lstm_vars
     h, c = torch.zeros(batch_size, dim_hidden), torch.zeros(batch_size, dim_hidden) # initial hidden and cell states
     for x in xs:
+        # the same as https://github.com/lixilinx/psgd_tf/blob/master/lstm_with_xor_problem.py, slightly twisted for speed
         ifgo = torch.cat([x, h, c], dim=1) @ W1[:-1] + W1[-1] # here cell state is in the input feature as well
-        i = torch.sigmoid(ifgo[:, :dim_hidden]) # input gate
-        f = torch.sigmoid(ifgo[:, dim_hidden:2*dim_hidden] + 1.0) # forget gate with large bias to encourage long term memory
-        g = torch.tanh(ifgo[:, 2*dim_hidden:3*dim_hidden]) # cell gate 
-        o = torch.sigmoid(ifgo[:, 3*dim_hidden:]) # output gate
-        c = f*c + i*g # new cell state
+        i, f, g, o = torch.chunk(torch.sigmoid(ifgo), 4, dim=1)
+        c = f*c + i*(2.0*g - 1.0) # new cell state
         h = o*torch.tanh(c) # new hidden state
     return h @ W2[:-1] + W2[-1]
 
