@@ -2,7 +2,6 @@
 """
 import matplotlib.pyplot as plt
 import torch
-from torch.autograd import grad
 import preconditioned_stochastic_gradient_descent as psgd 
 
 I, J, K = 10, 20, 50
@@ -15,11 +14,9 @@ xyz = [torch.randn(R, I), # initial guess for the decomposition
 
 def f(): # the decomposition loss 
     x, y, z = xyz
-    Reconstructed = 0.0
-    for r in range(R):
-        Reconstructed += x[r][:,None,None] * y[r][None,:,None]*z[r][None,None,:]
+    Reconstructed = torch.sum(x[:,:,None,None]*y[:,None,:,None]*z[:,None,None,:], dim=0)
     err = T - Reconstructed
-    return torch.sum(err*err) + 1e-3*sum([torch.sum(torch.abs(w)) for w in xyz]) # the penalty term encourages sparse decomposition
+    return torch.sum(err*err) + 1e-3*torch.sum(torch.abs(torch.cat(xyz, dim=1))) # the penalty term encourages sparse decomposition
 
 #demo_case = 'general_dense_preconditioner'
 #demo_case = 'general_sparse_LU_decomposition_preconditioner'
@@ -32,9 +29,9 @@ if demo_case == 'general_dense_preconditioner':
     for _ in range(100):
         loss = f()
         f_values.append(loss.item())
-        grads = grad(loss, xyz, create_graph=True)
-        vs = [torch.randn(w.shape) for w in xyz]
-        Hvs = grad(grads, xyz, vs) 
+        grads = torch.autograd.grad(loss, xyz, create_graph=True)
+        vs = [torch.randn_like(w) for w in xyz]
+        Hvs = torch.autograd.grad(grads, xyz, vs) 
         with torch.no_grad():
             Q = psgd.update_precond_dense(Q, vs, Hvs, step=0.1)
             pre_grads = psgd.precond_grad_dense(Q, grads)
@@ -53,9 +50,9 @@ elif demo_case == 'general_sparse_LU_decomposition_preconditioner':
     for _ in range(200):
         loss = f()
         f_values.append(loss.item())
-        grads = grad(loss, xyz, create_graph=True)
-        vs = [torch.randn(w.shape) for w in xyz]
-        Hvs = grad(grads, xyz, vs) 
+        grads = torch.autograd.grad(loss, xyz, create_graph=True)
+        vs = [torch.randn_like(w) for w in xyz]
+        Hvs = torch.autograd.grad(grads, xyz, vs) 
         with torch.no_grad():
             L12, l3, U12, u3 = psgd.update_precond_splu(L12, l3, U12, u3, vs, Hvs, step=0.1)
             pre_grads = psgd.precond_grad_splu(L12, l3, U12, u3, grads)
@@ -75,12 +72,12 @@ elif demo_case == 'Kronecker_product_preconditioner':
     # # example 3
     # Qs = [[0.1*torch.eye(w.shape[0]), torch.eye(w.shape[1])] for w in xyz]
 
-    for _ in range(200):
+    for _ in range(100):
         loss = f()
         f_values.append(loss.item())
-        grads = grad(loss, xyz, create_graph=True)
-        vs = [torch.randn(w.shape) for w in xyz]
-        Hvs = grad(grads, xyz, vs) 
+        grads = torch.autograd.grad(loss, xyz, create_graph=True)
+        vs = [torch.randn_like(w) for w in xyz]
+        Hvs = torch.autograd.grad(grads, xyz, vs) 
         with torch.no_grad():
             Qs = [psgd.update_precond_kron(Qlr[0], Qlr[1], v, Hv, step=0.1) for (Qlr, v, Hv) in zip(Qs, vs, Hvs)]
             pre_grads = [psgd.precond_grad_kron(Qlr[0], Qlr[1], g) for (Qlr, g) in zip(Qs, grads)]
