@@ -506,6 +506,7 @@ def precond_grad_splu(L12, l3, U12, u3, grads):
 
 
 ##############################################################################
+#
 # The UVd preconditioner is defined by
 #
 #   Q = (I + U*V')*diag(d)
@@ -515,35 +516,35 @@ def precond_grad_splu(L12, l3, U12, u3, grads):
 #   diag(d) + U*V'
 # 
 # It relates to the LM-BFGS and conjugate gradient methods. 
+#
+# The JIT decorator can enabled if helps. 
 # 
 
+#@torch.jit.script
 def IpUVtmatvec(U, V, x):
+    # type: (Tensor, Tensor, Tensor) -> Tensor
     """
     Returns (I + U*V')*x. All variables are either matrices or column vectors. 
     """
     return x + U.mm(V.t().mm(x))
 
-def IpUVtsolve(U, V, x):
-    """
-    Returns inv(I + U*V')*x. All variables are either matrices or column vectors.
-    """
-    VtU = V.t().mm(U)
-    I = torch.eye(VtU.size(dim=0), dtype=VtU.dtype, device=VtU.device)
-    return x - U.mm(torch.linalg.solve(I + VtU, V.t().mm(x)))
+# def IpUVtsolve(U, V, x):
+#     """
+#     Returns inv(I + U*V')*x. All variables are either matrices or column vectors.
+#     """
+#     VtU = V.t().mm(U)
+#     I = torch.eye(VtU.size(dim=0), dtype=VtU.dtype, device=VtU.device)
+#     return x - U.mm(torch.linalg.solve(I + VtU, V.t().mm(x))) # solve is too slow!
 
-def UVt_norm2_est_pow(U, V, num_iter=2):
-    """
-    Estimate the norm of matrix U*V' with power iteration method.
-    U and V are two tall matrices. 
-    """
-    x = V.mm(torch.randn_like(V[:1]).t())
-    for _ in range(num_iter):
-        x = x/torch.sqrt(torch.sum(x*x))
-        x = U.mm(V.t().mm(x))
-        x = V.mm(U.t().mm(x))
-    return torch.pow(torch.sum(x*x), 0.25)
+# def norm_UVt(U, V):
+#     """
+#     Returns ||U*V'||_fro = sqrt(tr(U'*U*V'*V)) = sqrt(sum((U'*U)*(V'*V))) 
+#     """
+#     return torch.sqrt(torch.abs(torch.sum( (U.t().mm(U))*(V.t().mm(V)) )))
 
-def update_precond_UVd_math(U, V, d, v, h, step=0.01, norm2_est='fro', _tiny=1.2e-38):
+#@torch.jit.script
+def update_precond_UVd_math(U, V, d, v, h, step=0.01, _tiny=1.2e-38):
+    # type: (Tensor, Tensor, Tensor, Tensor, Tensor, float, float) -> List[Tensor]
     """
     Update preconditioner Q = (I + U*V')*diag(d) with (vector, Hessian-vector product) = (v, h).
                                
@@ -556,33 +557,60 @@ def update_precond_UVd_math(U, V, d, v, h, step=0.01, norm2_est='fro', _tiny=1.2
         U, V = U/rho, rho*V
 
     Qh = IpUVtmatvec(U, V, d*h)
-    invQtv = IpUVtsolve(V, U, v/d)
     Ph = d*IpUVtmatvec(V, U, Qh)
-    invPv = IpUVtsolve(U, V, invQtv)/d
+    
+    # invQtv = IpUVtsolve(V, U, v/d)
+    # invPv = IpUVtsolve(U, V, invQtv)/d
+    VtU = V.t().mm(U)
+    I = torch.eye(VtU.size(dim=0), dtype=VtU.dtype, device=VtU.device)
+    IpVtU = I + VtU
+    invQtv = v/d
+    # torch uses LU decomposition for linalg.solve; slow even for tiny mtx
+    invQtv = invQtv - V.mm(torch.linalg.solve(IpVtU.t(), U.t().mm(invQtv)))  
+    invPv  = invQtv - U.mm(torch.linalg.solve(IpVtU,     V.t().mm(invQtv)))
+    invPv = invPv/d
 
     nablaD = Ph*h - v*invPv
     mu = step/(torch.max(torch.abs(nablaD)) + _tiny)
     d = d - mu*d*nablaD
-
-    # update either U or V, not both at the same time 
+    
+    # update either U or V, not both at the same time
     if torch.rand([]) < 0.5:
-        nablaU = Qh.mm(Qh.t().mm(V)) - invQtv.mm(invQtv.t().mm(V))
-        if norm2_est == 'pow':
-            mu = step/(UVt_norm2_est_pow(nablaU, V) + _tiny) 
-        else: # default is 'fro' bound; too conservative, so I increase step to step^0.5
-            mu = step**0.5/(torch.sqrt(torch.sum(nablaU*nablaU) * torch.sum(V*V)) + _tiny)
-        U = U - mu*nablaU - mu*nablaU.mm(V.t().mm(U))
+        # nablaU = Qh.mm(Qh.t().mm(V)) - invQtv.mm(invQtv.t().mm(V))
+        # mu = step/(norm_UVt(nablaU, V) + _tiny)
+        # U = U - mu*(nablaU + nablaU.mm(V.t().mm(U)))
+        a, b = Qh, invQtv
+        atV = a.t().mm(V)
+        atVVt = atV.mm(V.t())
+        btV = b.t().mm(V)
+        btVVt = btV.mm(V.t())
+        norm = torch.sqrt(torch.abs( (a.t().mm(a))*(atVVt.mm(atVVt.t())) # abs to avoid sqrt(-0.0) 
+                                    +(b.t().mm(b))*(btVVt.mm(btVVt.t())) 
+                                  -2*(a.t().mm(b))*(atVVt.mm(btVVt.t())) ))
+        mu = step/(norm + _tiny)
+        U = U - mu*( a.mm(atV.mm(IpVtU)) 
+                    -b.mm(btV.mm(IpVtU)) )
     else:
-        nablaV = Qh.mm(Qh.t().mm(U)) - invQtv.mm(invQtv.t().mm(U))
-        if norm2_est == 'pow':
-            mu = step/(UVt_norm2_est_pow(U, nablaV) + _tiny)
-        else: # default is 'fro' method; increase step to step^0.5
-            mu = step**0.5/(torch.sqrt(torch.sum(nablaV*nablaV) * torch.sum(U*U)) + _tiny)
-        V = V - mu*nablaV - mu*V.mm(U.t().mm(nablaV))
+        # nablaV = Qh.mm(Qh.t().mm(U)) - invQtv.mm(invQtv.t().mm(U))
+        # mu = step/(norm_UVt(U, nablaV) + _tiny)
+        # V = V - mu*(nablaV + V.mm(U.t().mm(nablaV)))
+        a, b = Qh, invQtv
+        atU = a.t().mm(U)
+        btU = b.t().mm(U)
+        UUta = U.mm(atU.t())
+        UUtb = U.mm(btU.t())
+        norm = torch.sqrt(torch.abs( (UUta.t().mm(UUta))*(a.t().mm(a)) # abs to avoid sqrt(-0.0)
+                                    +(UUtb.t().mm(UUtb))*(b.t().mm(b))
+                                  -2*(UUta.t().mm(UUtb))*(a.t().mm(b)) ))
+        mu = step/(norm + _tiny)
+        V = V - mu*( (a + V.mm(atU.t())).mm(atU) 
+                    -(b + V.mm(btU.t())).mm(btU) )
 
     return [U, V, d]
 
+#@torch.jit.script
 def precond_grad_UVd_math(U, V, d, g):
+    # type: (Tensor, Tensor, Tensor, Tensor) -> Tensor
     """
     Preconditioning gradient g with Q = (I + U*V')*diag(d).
                                          
@@ -593,33 +621,31 @@ def precond_grad_UVd_math(U, V, d, g):
     return g
 
 
-def update_precond_UVd(UVd, vs, hs, step=0.01, norm2_est='fro', _tiny=1.2e-38):
+#@torch.jit.script
+def update_precond_UVd(UVd, vs, hs, step=0.01, _tiny=1.2e-38):
+    # type: (Tensor, List[Tensor], List[Tensor], float, float) -> Tensor
     """
     update UVd preconditioner Q = (I + U*V')*diag(d) with
     vs: a list of vectors;
     hs: a list of associated Hessian-vector products;
-    step: updating step size in range (0, 1);
-    norm2_est: spectral norm estimation method, either 'fro' or 'pow'. 
-        The 'fro' option uses Frobenius norm, too conservative, but safe;
-        the 'pow' option uses power iteration estimation, generally more accurate,
-        but could be unsafe when seriously under-estimate the spectral norm.
+    step: step size, setting to larger values, say 0.1, if updating is sparse;
     _tiny: an offset to avoid divided by zero. 
     
     It is a wrapped version of function update_precond_UVd_math for easy use. 
     Also, U, V, and d are transposed (row-major order as Python convention), and 
     packaged into one tensor. 
-    """
-    assert norm2_est in ['fro', 'pow'] # do not expect its change in graph mode 
+    """ 
     sizes = [len(UVd)//2]*2 + [1]
-    UVd = UVd.t()
-    U, V, d = torch.split(UVd, sizes, dim=1)
+    U, V, d = torch.split(UVd.t(), sizes, dim=1)
 
-    v = torch.cat([torch.reshape(v, [-1]) for v in vs])
-    h = torch.cat([torch.reshape(h, [-1]) for h in hs])
-    U, V, d = update_precond_UVd_math(U, V, d, v[:,None], h[:,None], step=step, norm2_est=norm2_est, _tiny=_tiny)
+    v = torch.cat([torch.flatten(v) for v in vs])
+    h = torch.cat([torch.flatten(h) for h in hs])
+    U, V, d = update_precond_UVd_math(U, V, d, v[:,None], h[:,None], step=step, _tiny=_tiny)
     return torch.cat([U, V, d], 1).t()
 
+#@torch.jit.script
 def precond_grad_UVd(UVd, grads):
+    # type: (Tensor, List[Tensor]) -> List[Tensor]
     """
     return preconditioned gradient with UVd preconditioner Q = (I + U*V')*diag(d),
     and a list of gradients, grads.
@@ -629,15 +655,14 @@ def precond_grad_UVd(UVd, grads):
     packaged into one tensor.
     """
     sizes = [len(UVd)//2]*2 + [1]
-    UVd = UVd.t()
-    U, V, d = torch.split(UVd, sizes, dim=1)
+    U, V, d = torch.split(UVd.t(), sizes, dim=1)
 
     # record the sizes and shapes, and then flatten gradients
     sizes = [torch.numel(g) for g in grads]
     shapes = [g.shape for g in grads]
     cumsizes = torch.cumsum(torch.tensor(sizes), 0)
     
-    grad = torch.cat([torch.reshape(g, [-1]) for g in grads])
+    grad = torch.cat([torch.flatten(g) for g in grads])
 
     # precondition gradients
     pre_grad = precond_grad_UVd_math(U, V, d, grad[:,None])
