@@ -6,7 +6,7 @@ import torch
 import preconditioned_stochastic_gradient_descent as psgd
 
 device = torch.device('cpu')
-batch_size, seq_len = 128, 20  # increasing sequence_length
+batch_size, seq_len = 128, 20           # increasing sequence_length
 dim_in, dim_hidden, dim_out = 2, 30, 1  # or decreasing dimension_hidden_layer will make learning harder
 
 def generate_train_data():
@@ -34,9 +34,9 @@ def get_rand_orth(dim):
     q, _ = np.linalg.qr(temp)
     return torch.tensor(q, dtype=torch.float32).to(device)
 
-class RNN_net(torch.nn.Module):
+class Model(torch.nn.Module):
     def __init__(self):
-        super(RNN_net, self).__init__()
+        super(Model, self).__init__()
         self.W1x = torch.nn.Parameter(0.1 * torch.randn(dim_in, dim_hidden))
         self.W1h = torch.nn.Parameter(get_rand_orth(dim_hidden))
         self.b1 = torch.nn.Parameter(torch.zeros([]))
@@ -49,18 +49,16 @@ class RNN_net(torch.nn.Module):
             h = torch.tanh(x @ self.W1x + h @ self.W1h + self.b1)
         return h @ self.W2 + self.b2
 
-rnn_net = RNN_net().to(device)
+model = Model().to(device)
+# initialize the PSGD optimizer 
+opt = psgd.UVd(model.parameters(),
+               rank_of_modification=10, preconditioner_init_scale=1.0,
+               lr_params=0.01, lr_preconditioner=0.01,
+               grad_clip_max_norm=1.0, preconditioner_update_probability=1.0,
+               exact_hessian_vector_product=True)
 
 def train_loss(xy_pair):  # logistic loss
-    return -torch.mean(torch.log(torch.sigmoid(xy_pair[1] * rnn_net(xy_pair[0]))))
-
-params_with_grad = [param for param in rnn_net.parameters() if param.requires_grad]
-# params_with_grad = params_with_grad[1] # PSGD also can learn any specific param
-psgd_uvd = psgd.UVd(params_with_grad,
-                    rank_of_modification=10, preconditioner_init_scale=1.0,
-                    lr_params=0.01, lr_preconditioner=0.01,
-                    grad_clip_max_norm=1.0, preconditioner_update_probability=1.0,
-                    exact_hessian_vector_product=True)
+    return -torch.mean(torch.log(torch.sigmoid(xy_pair[1] * model(xy_pair[0]))))
 
 Losses = []
 for num_iter in range(100000):
@@ -68,21 +66,23 @@ for num_iter in range(100000):
 
     # rng_state = torch.get_rng_state()
     # rng_cuda_state = torch.cuda.get_rng_state()
-    def closure(): # if rng is used inside closure, make sure it starts from the same state
+    def closure(): 
+        # If exact_hessian_vector_product=False and rng is used inside closure, 
+        # make sure rng starts from the same state; otherwise, doesn't matter. 
         # torch.set_rng_state(rng_state)
         # torch.cuda.set_rng_state(rng_cuda_state)
         return train_loss(train_data) # return a loss
         # return [train_loss(train_data),] # or return a list with the 1st one being loss
 
-    loss = psgd_uvd.step(closure)
+    loss = opt.step(closure)
     Losses.append(loss.item())
     print('Iteration: {}; loss: {}'.format(num_iter, Losses[-1]))
     if num_iter+1 == 1000: # feel free to reschedule these mutable settings
-        # psgd_uvd.lr_params = 0.01
-        # psgd_uvd.lr_preconditioner = 0.01
-        # psgd_uvd.grad_clip_max_norm = 1.0
-        # psgd_uvd.preconditioner_update_probability = 1.0
-        psgd_uvd.exact_hessian_vector_product = False
+        # opt.lr_params = 0.01
+        # opt.lr_preconditioner = 0.01
+        # opt.grad_clip_max_norm = 1.0
+        # opt.preconditioner_update_probability = 1.0
+        opt.exact_hessian_vector_product = False
 
     if Losses[-1] < 0.1:
         print('Deemed to be successful and ends training')
