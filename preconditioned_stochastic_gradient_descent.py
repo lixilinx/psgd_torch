@@ -507,7 +507,7 @@ def precond_grad_splu(L12, l3, U12, u3, grads):
 
 ##############################################################################
 #
-# The UVd preconditioner is defined by
+# The low-rank modification (UVd) preconditioner is defined by
 #
 #   Q = (I + U*V')*diag(d)
 #
@@ -517,7 +517,7 @@ def precond_grad_splu(L12, l3, U12, u3, grads):
 # 
 # It relates to the LM-BFGS and conjugate gradient methods. 
 #
-# The JIT decorator can enabled if helps. 
+# The JIT decorator can be enabled if helps. 
 # 
 
 #@torch.jit.script
@@ -534,7 +534,7 @@ def IpUVtmatvec(U, V, x):
 #     """
 #     VtU = V.t().mm(U)
 #     I = torch.eye(VtU.size(dim=0), dtype=VtU.dtype, device=VtU.device)
-#     return x - U.mm(torch.linalg.solve(I + VtU, V.t().mm(x))) # solve is too slow!
+#     return x - U.mm(torch.linalg.solve(I + VtU, V.t().mm(x))) # torch.solve is slow
 
 # def norm_UVt(U, V):
 #     """
@@ -543,18 +543,21 @@ def IpUVtmatvec(U, V, x):
 #     return torch.sqrt(torch.abs(torch.sum( (U.t().mm(U))*(V.t().mm(V)) )))
 
 #@torch.jit.script
-def update_precond_UVd_math(U, V, d, v, h, step=0.01, _tiny=1.2e-38):
-    # type: (Tensor, Tensor, Tensor, Tensor, Tensor, float, float) -> List[Tensor]
+def update_precond_UVd_math_(U, V, d, v, h, step, tiny):
+    # type: (Tensor, Tensor, Tensor, Tensor, Tensor, float, float) -> None
     """
     Update preconditioner Q = (I + U*V')*diag(d) with (vector, Hessian-vector product) = (v, h).
+    State variables U, V and d are updated inplace. 
                                
     U, V, d, v, and h are either matrices or column vectors.  
     """
-    # balance the numerical dynamic ranges of U and V
+    # balance the numerical dynamic ranges of U and V; optional 
     if torch.rand([]) < 0.01:
-        maxU, maxV = torch.max(torch.abs(U)), torch.max(torch.abs(V))
-        rho = torch.sqrt(maxU/maxV)
-        U, V = U/rho, rho*V
+        normU = torch.linalg.vector_norm(U)
+        normV = torch.linalg.vector_norm(V)
+        rho = torch.sqrt(normU/normV)
+        U.div_(rho)
+        V.mul_(rho)
 
     Qh = IpUVtmatvec(U, V, d*h)
     Ph = d*IpUVtmatvec(V, U, Qh)
@@ -571,15 +574,16 @@ def update_precond_UVd_math(U, V, d, v, h, step=0.01, _tiny=1.2e-38):
     invPv = invPv/d
 
     nablaD = Ph*h - v*invPv
-    mu = step/(torch.max(torch.abs(nablaD)) + _tiny)
-    d = d - mu*d*nablaD
+    mu = step/(torch.max(torch.abs(nablaD)) + tiny)
+    #d = d - mu*d*nablaD
+    d.sub_(mu*d*nablaD)
     
     # update either U or V, not both at the same time
+    a, b = Qh, invQtv
     if torch.rand([]) < 0.5:
         # nablaU = Qh.mm(Qh.t().mm(V)) - invQtv.mm(invQtv.t().mm(V))
         # mu = step/(norm_UVt(nablaU, V) + _tiny)
         # U = U - mu*(nablaU + nablaU.mm(V.t().mm(U)))
-        a, b = Qh, invQtv
         atV = a.t().mm(V)
         atVVt = atV.mm(V.t())
         btV = b.t().mm(V)
@@ -587,14 +591,15 @@ def update_precond_UVd_math(U, V, d, v, h, step=0.01, _tiny=1.2e-38):
         norm = torch.sqrt(torch.abs( (a.t().mm(a))*(atVVt.mm(atVVt.t())) # abs to avoid sqrt(-0.0) 
                                     +(b.t().mm(b))*(btVVt.mm(btVVt.t())) 
                                   -2*(a.t().mm(b))*(atVVt.mm(btVVt.t())) ))
-        mu = step/(norm + _tiny)
-        U = U - mu*( a.mm(atV.mm(IpVtU)) 
-                    -b.mm(btV.mm(IpVtU)) )
+        mu = step/(norm + tiny)
+        # U = U - mu*( a.mm(atV.mm(IpVtU)) 
+        #             -b.mm(btV.mm(IpVtU)) )
+        U.sub_(mu*( a.mm(atV.mm(IpVtU)) 
+                   -b.mm(btV.mm(IpVtU)) ))
     else:
         # nablaV = Qh.mm(Qh.t().mm(U)) - invQtv.mm(invQtv.t().mm(U))
         # mu = step/(norm_UVt(U, nablaV) + _tiny)
         # V = V - mu*(nablaV + V.mm(U.t().mm(nablaV)))
-        a, b = Qh, invQtv
         atU = a.t().mm(U)
         btU = b.t().mm(U)
         UUta = U.mm(atU.t())
@@ -602,11 +607,13 @@ def update_precond_UVd_math(U, V, d, v, h, step=0.01, _tiny=1.2e-38):
         norm = torch.sqrt(torch.abs( (UUta.t().mm(UUta))*(a.t().mm(a)) # abs to avoid sqrt(-0.0)
                                     +(UUtb.t().mm(UUtb))*(b.t().mm(b))
                                   -2*(UUta.t().mm(UUtb))*(a.t().mm(b)) ))
-        mu = step/(norm + _tiny)
-        V = V - mu*( (a + V.mm(atU.t())).mm(atU) 
-                    -(b + V.mm(btU.t())).mm(btU) )
+        mu = step/(norm + tiny)
+        # V = V - mu*( (a + V.mm(atU.t())).mm(atU) 
+        #             -(b + V.mm(btU.t())).mm(btU) )
+        V.sub_(mu*( (a + V.mm(atU.t())).mm(atU) 
+                   -(b + V.mm(btU.t())).mm(btU) ))
 
-    return [U, V, d]
+    # return [U, V, d]
 
 #@torch.jit.script
 def precond_grad_UVd_math(U, V, d, g):
@@ -621,59 +628,9 @@ def precond_grad_UVd_math(U, V, d, g):
     return g
 
 
-#@torch.jit.script
-def update_precond_UVd(UVd, vs, hs, step=0.01, _tiny=1.2e-38):
-    # type: (Tensor, List[Tensor], List[Tensor], float, float) -> Tensor
-    """
-    update UVd preconditioner Q = (I + U*V')*diag(d) with
-    vs: a list of vectors;
-    hs: a list of associated Hessian-vector products;
-    step: step size, setting to larger values, say 0.1, if updating is sparse;
-    _tiny: an offset to avoid divided by zero. 
-    
-    It is a wrapped version of function update_precond_UVd_math for easy use. 
-    Also, U, V, and d are transposed (row-major order as Python convention), and 
-    packaged into one tensor. 
-    """ 
-    sizes = [len(UVd)//2]*2 + [1]
-    U, V, d = torch.split(UVd.t(), sizes, dim=1)
-
-    v = torch.cat([torch.flatten(v) for v in vs])
-    h = torch.cat([torch.flatten(h) for h in hs])
-    U, V, d = update_precond_UVd_math(U, V, d, v[:,None], h[:,None], step=step, _tiny=_tiny)
-    return torch.cat([U, V, d], 1).t()
-
-#@torch.jit.script
-def precond_grad_UVd(UVd, grads):
-    # type: (Tensor, List[Tensor]) -> List[Tensor]
-    """
-    return preconditioned gradient with UVd preconditioner Q = (I + U*V')*diag(d),
-    and a list of gradients, grads.
-    
-    It is a wrapped version of function precond_grad_UVd_math for easy use.
-    Also, U, V, and d are transposed (row-major order as Python convention), and 
-    packaged into one tensor.
-    """
-    sizes = [len(UVd)//2]*2 + [1]
-    U, V, d = torch.split(UVd.t(), sizes, dim=1)
-
-    # record the sizes and shapes, and then flatten gradients
-    sizes = [torch.numel(g) for g in grads]
-    shapes = [g.shape for g in grads]
-    cumsizes = torch.cumsum(torch.tensor(sizes), 0)
-    
-    grad = torch.cat([torch.flatten(g) for g in grads])
-
-    # precondition gradients
-    pre_grad = precond_grad_UVd_math(U, V, d, grad[:,None])
-
-    # restore gradients to their original shapes
-    return [torch.reshape(pre_grad[j-i:j], s) for (i, j, s) in zip(sizes, cumsizes, shapes)]
-
-
 class UVd:
     """
-    Implements low-rank modification (UVd) preconditioner, Q = U*V' + diag(d), as a class.
+    Implements the low-rank modification (UVd) preconditioner, Q = U*V' + diag(d), as a class.
 
     Args for initialization:
         params_with_grad: a list of parameters or variables requiring gradients;
@@ -684,25 +641,30 @@ class UVd:
         grad_clip_max_norm: maximum allowable gradient norm after clipping, None for no clipping;
         preconditioner_update_probability: probability on updating Q, 1 for updating at every step, and 0 for never;
         exact_hessian_vector_product: True for exact Hessian-vector product via 2nd derivative,
-                        and False for approximated one via finite-difference formulae;
-        _tiny: a tiny offset number to avoid dividing by zero.
+                                    and False for approximated one via finite-difference formulae.
 
     Notes:
-        Note 1: It might be faster to approximate the Hessian-vector product using the finite-difference formulae than with 2nd derivatives.
-        When exact_hessian_vector_product=False, make sure that the closure produces the same outputs given the same inputs.
+        Note 1: The Hessian-vector product can be approximated using the finite-difference formulae by setting 
+        exact_hessian_vector_product = False when the 2nd derivatives is not available.
+        In this case, make sure that the closure produces the same outputs given the same inputs, 
+        except for numerical errors due to non-deterministic behaviors.
         Random numbers, if any, used inside the closure should be generated starting from the same state, where the rng state can be
         read and set by, e.g., `torch.cuda.get_rng_state' and `torch.cuda.set_rng_state', respectively.
 
-        Note 2: `torch.linalg.solve' is called twice in function `update_precond_UVd_math'.
-        It could be slower than many other solvers, especially for small matrices on cuda.
-        Considering replace it with faster ones if possible.
+        Note 2: `torch.linalg.solve' is called twice in function `update_precond_UVd_math_'.
+        Certain solver could be orders of magnitude faster than others, especially for small matrices (see the pdf file).
+        Considering replace it with faster ones if the default solver is too slow.
 
-        Note 3: currently, no support of sparse gradients.
+        Note 3: currently, no support of sparse and mixed-precision gradients. 
+        Half precision is supported except that torch.linalg.solve (v1.12) requires casting float16 to float32.    
+        
+        Note 4: lr_params, lr_preconditioner, grad_clip_max_norm, preconditioner_update_probability, and 
+        exact_hessian_vector_product (bool) can be reset after initialization. 
     """
     def __init__(self,  params_with_grad, rank_of_modification:int=10, preconditioner_init_scale=1.0,
                         lr_params=0.01, lr_preconditioner=0.01,
-                        grad_clip_max_norm:float=None, preconditioner_update_probability=1.0,
-                        exact_hessian_vector_product:bool=True, _tiny=1.2e-38):
+                        grad_clip_max_norm=None, preconditioner_update_probability=1.0,
+                        exact_hessian_vector_product:bool=True):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner
@@ -710,13 +672,14 @@ class UVd:
         self.preconditioner_update_probability = preconditioner_update_probability
         self.exact_hessian_vector_product = exact_hessian_vector_product
         # protected members
-        self._params_with_grad = [params_with_grad,] if isinstance(params_with_grad, torch.Tensor) else params_with_grad
+        params_with_grad = [params_with_grad,] if isinstance(params_with_grad, torch.Tensor) else params_with_grad
+        self._params_with_grad = [param for param in params_with_grad if param.requires_grad] # double check requires_grad flag
         dtype, device = self._params_with_grad[0].dtype, self._params_with_grad[0].device
-        self._tiny = _tiny
-        self._delta_param_scale = torch.finfo(self._params_with_grad[0].dtype).eps**0.5
+        self._tiny = torch.finfo(dtype).tiny
+        self._delta_param_scale = torch.finfo(dtype).eps**0.5
         self._param_sizes = [torch.numel(param) for param in self._params_with_grad]
         self._param_cumsizes = torch.cumsum(torch.tensor(self._param_sizes), 0)
-        num_params = self._param_cumsizes[-1].item()
+        num_params = self._param_cumsizes[-1]
         self._U = torch.randn(num_params, rank_of_modification, dtype=dtype, device=device) / (num_params*rank_of_modification)**0.5
         self._V = torch.randn(num_params, rank_of_modification, dtype=dtype, device=device) / (num_params*rank_of_modification)**0.5
         self._d = torch.ones( num_params, 1, dtype=dtype, device=device) * preconditioner_init_scale
@@ -724,13 +687,14 @@ class UVd:
     @torch.no_grad()
     def step(self, closure):
         """
-        Performs a single step of PSGD with low-rank modification (UVd) preconditioner.
+        Performs a single step of PSGD with low-rank modification (UVd) preconditioner, i.e., 
+        updating the trainable parameters once, and returning what closure returns.
 
         Args:
             closure (callable): a closure that evaluates the function of self._params_with_grad,
                                 and returns the loss, or an iterable with the first one being loss.
-
-        It updates the parameters, and returns what closure returns.
+                                Random numbers, if any, used inside the closure should be generated starting 
+                                from the same rng state if self.exact_hessian_vector_product = False; otherwise doesn't matter. 
         """
         if torch.rand([]) < self.preconditioner_update_probability:
             # evaluates gradients, Hessian-vector product, and updates the preconditioner
@@ -756,10 +720,14 @@ class UVd:
                     perturbed_grads = torch.autograd.grad(perturbed_loss, self._params_with_grad)
                 Hvs = [perturbed_g - g for (perturbed_g, g) in zip(perturbed_grads, grads)]
             # update preconditioner
-            v = torch.cat([v.view(-1) for v in vs])
-            h = torch.cat([h.view(-1) for h in Hvs])
-            self._U, self._V, self._d = update_precond_UVd_math(self._U, self._V, self._d,
-                                                                v[:,None], h[:,None], step=self.lr_preconditioner, _tiny=self._tiny)
+            v = torch.cat([torch.flatten(v) for v in vs])
+            h = torch.cat([torch.flatten(h) for h in Hvs])
+            if self.exact_hessian_vector_product:
+                update_precond_UVd_math_(self._U, self._V, self._d,
+                                         v[:,None], h[:,None], step=self.lr_preconditioner, tiny=self._tiny)
+            else: # compensate the levels of v and h; helpful to reduce numerical errors in half-precision training
+                update_precond_UVd_math_(self._U, self._V, self._d,
+                                         v[:,None]/self._delta_param_scale, h[:,None]/self._delta_param_scale, step=self.lr_preconditioner, tiny=self._tiny)
         else:
             # only evaluates the gradients
             with torch.enable_grad():
@@ -769,14 +737,15 @@ class UVd:
             vs = None # no vs and Hvs
 
         # preconditioned gradients
-        grad = torch.cat([g.view(-1) for g in grads])
+        grad = torch.cat([torch.flatten(g) for g in grads])
         pre_grad = precond_grad_UVd_math(self._U, self._V, self._d, grad[:, None])
         # gradient clipping is optional
-        if self.grad_clip_max_norm is not None:
-            grad_norm = torch.linalg.vector_norm(pre_grad) + self._tiny
-            lr = min(self.grad_clip_max_norm/grad_norm, 1.0) * self.lr_params
-        else:
+        if self.grad_clip_max_norm is None:
             lr = self.lr_params
+        else:
+            grad_norm = torch.linalg.vector_norm(pre_grad) + self._tiny
+            lr = self.lr_params * min(self.grad_clip_max_norm/grad_norm, 1.0)
+            
         # update the parameters
         if self.exact_hessian_vector_product or (vs is None):
             [param.subtract_(lr * pre_grad[j - i:j].view_as(param))
