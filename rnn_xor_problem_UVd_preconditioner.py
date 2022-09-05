@@ -39,7 +39,7 @@ class Model(torch.nn.Module):
         super(Model, self).__init__()
         self.W1x = torch.nn.Parameter(0.1 * torch.randn(dim_in, dim_hidden))
         self.W1h = torch.nn.Parameter(get_rand_orth(dim_hidden))
-        self.b1 = torch.nn.Parameter(torch.zeros([]))
+        self.b1 = torch.nn.Parameter(torch.zeros(dim_hidden))
         self.W2 = torch.nn.Parameter(0.1 * torch.randn(dim_hidden, dim_out))
         self.b2 = torch.nn.Parameter(torch.zeros([]))
 
