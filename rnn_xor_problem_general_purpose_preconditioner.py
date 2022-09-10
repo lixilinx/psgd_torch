@@ -50,12 +50,20 @@ class Model(torch.nn.Module):
         return h @ self.W2 + self.b2
 
 model = Model().to(device)
-# initialize the PSGD optimizer 
+# initialize the PSGD optimizer with the low-rank modification preconditioner 
 opt = psgd.UVd(model.parameters(),
                rank_of_modification=10, preconditioner_init_scale=1.0,
                lr_params=0.01, lr_preconditioner=0.01,
                grad_clip_max_norm=1.0, preconditioner_update_probability=1.0,
                exact_hessian_vector_product=True)
+"""
+# initialize the PSGD optimizer with the X-matrix preconditioner 
+opt = psgd.XMat(model.parameters(),
+                preconditioner_init_scale=1.0,
+                lr_params=0.01, lr_preconditioner=0.01,
+                grad_clip_max_norm=1.0, preconditioner_update_probability=1.0,
+                exact_hessian_vector_product=True)
+"""
 
 def train_loss(xy_pair):  # logistic loss
     return -torch.mean(torch.log(torch.sigmoid(xy_pair[1] * model(xy_pair[0]))))
