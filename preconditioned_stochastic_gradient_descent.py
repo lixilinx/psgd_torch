@@ -757,3 +757,165 @@ class UVd:
         return closure_returns
 
 ################## end of UVd preconditioner #################################
+
+
+##############################################################################
+# An Xmat (X-matrix) preconditioner is defined by
+#
+#   Q = diag(a) + adiag(b)
+#
+# where adiag means anti-diagonal.
+# It's slightly more complicated than a diagonal preconditioner, but performs much better.
+#
+
+#@torch.jit.script
+def update_precond_Xmat_math_(a, b, v, h, step, tiny):
+    # type: (Tensor, Tensor, Tensor, Tensor, float, float) -> None
+    """
+    Update preconditioner Q = diag(a) + adiag(b) with (vector, Hessian-vector product) = (v, h).
+    State variables a and b are updated inplace.
+    """
+    Qh = a*h + b*torch.flip(h, [0])
+    aflip, bflip = torch.flip(a, [0]), torch.flip(b, [0])
+    invQtv = (aflip*v - bflip*torch.flip(v, [0]))/(a*aflip - b*bflip)
+    nablaA = Qh*Qh - invQtv*invQtv
+    nablaB = Qh*torch.flip(Qh, [0]) - invQtv*torch.flip(invQtv, [0])
+    q, r = divmod(len(nablaB), 2)
+    if r == 1:
+        nablaB[q] = 0
+
+    mu = step/(torch.maximum(torch.max(torch.abs(nablaA)), torch.max(torch.abs(nablaB))) + tiny)
+    a.sub_(mu*(nablaA*a + nablaB*bflip))
+    b.sub_(mu*(nablaA*b + nablaB*aflip))
+
+#@torch.jit.script
+def precond_grad_Xmat_math(a, b, g):
+    # type: (Tensor, Tensor, Tensor) -> Tensor
+    """
+    Preconditioning gradient g with Q = diag(a) + adiag(b).
+    """
+    ab = a * b
+    return (a*a + torch.flip(b*b, [0]))*g + (ab + torch.flip(ab, [0]))*torch.flip(g, [0])
+
+
+class XMat:
+    """
+    Implements the Xmat preconditioner, Q = diag(a) + adiag(b), as a class.
+    Args for initialization:
+        params_with_grad: a list of parameters or variables requiring gradients;
+        preconditioner_init_scale: initial scale of Q, i.e., Q = preconditioner_init_scale*eye();
+        lr_params: normalized learning rate for parameters in range [0, 1];
+        lr_preconditioner: normalized learning rate for preconditioner in range [0, 1];
+        grad_clip_max_norm: maximum allowable gradient norm after clipping, None for no clipping;
+        preconditioner_update_probability: probability on updating Q, 1 for updating at every step, and 0 for never;
+        exact_hessian_vector_product: True for exact Hessian-vector product via 2nd derivative,
+                                    and False for approximated one via finite-difference formulae.
+    Notes:
+        Note 1: The Hessian-vector product can be approximated using the finite-difference formulae by setting
+        exact_hessian_vector_product = False when the 2nd derivatives is not available.
+        In this case, make sure that the closure produces the same outputs given the same inputs,
+        except for numerical errors due to non-deterministic behaviors.
+        Random numbers, if any, used inside the closure should be generated starting from the same state, where the rng state can be
+        read and set by, e.g., `torch.cuda.get_rng_state' and `torch.cuda.set_rng_state', respectively.
+
+        Note 2: currently, no support of sparse and mixed-precision gradients.
+
+        Note 3: lr_params, lr_preconditioner, grad_clip_max_norm, preconditioner_update_probability, and
+        exact_hessian_vector_product (bool) can be reset after initialization.
+    """
+
+    def __init__(self, params_with_grad, preconditioner_init_scale=1.0,
+                 lr_params=0.01, lr_preconditioner=0.01,
+                 grad_clip_max_norm=None, preconditioner_update_probability=1.0,
+                 exact_hessian_vector_product: bool = True):
+        # mutable members
+        self.lr_params = lr_params
+        self.lr_preconditioner = lr_preconditioner
+        self.grad_clip_max_norm = grad_clip_max_norm
+        self.preconditioner_update_probability = preconditioner_update_probability
+        self.exact_hessian_vector_product = exact_hessian_vector_product
+        # protected members
+        params_with_grad = [params_with_grad, ] if isinstance(params_with_grad, torch.Tensor) else params_with_grad
+        self._params_with_grad = [param for param in params_with_grad if param.requires_grad]  # double check requires_grad flag
+        dtype, device = self._params_with_grad[0].dtype, self._params_with_grad[0].device
+        self._tiny = torch.finfo(dtype).tiny
+        self._delta_param_scale = torch.finfo(dtype).eps ** 0.5
+        self._param_sizes = [torch.numel(param) for param in self._params_with_grad]
+        self._param_cumsizes = torch.cumsum(torch.tensor(self._param_sizes), 0)
+        num_params = self._param_cumsizes[-1]
+        self._a = torch.ones(num_params, dtype=dtype, device=device)*preconditioner_init_scale
+        self._b = torch.zeros(num_params, dtype=dtype, device=device)
+
+    @torch.no_grad()
+    def step(self, closure):
+        """
+        Performs a single step of PSGD with Xmat preconditioner, i.e.,
+        updating the trainable parameters once, and returning what closure returns.
+        Args:
+            closure (callable): a closure that evaluates the function of self._params_with_grad,
+                                and returns the loss, or an iterable with the first one being loss.
+                                Random numbers, if any, used inside the closure should be generated starting
+                                from the same rng state if self.exact_hessian_vector_product = False; otherwise doesn't matter.
+        """
+        if torch.rand([]) < self.preconditioner_update_probability:
+            # evaluates gradients, Hessian-vector product, and updates the preconditioner
+            if self.exact_hessian_vector_product:
+                # exact Hessian-vector product
+                with torch.enable_grad():
+                    closure_returns = closure()
+                    loss = closure_returns if isinstance(closure_returns, torch.Tensor) else closure_returns[0]
+                    grads = torch.autograd.grad(loss, self._params_with_grad, create_graph=True)
+                    vs = [torch.randn_like(param) for param in self._params_with_grad]
+                    Hvs = torch.autograd.grad(grads, self._params_with_grad, vs)
+            else:
+                # approximate Hessian-vector product via finite-difference formulae. Use it with cautions.
+                with torch.enable_grad():
+                    closure_returns = closure()
+                    loss = closure_returns if isinstance(closure_returns, torch.Tensor) else closure_returns[0]
+                    grads = torch.autograd.grad(loss, self._params_with_grad)
+                vs = [self._delta_param_scale * torch.randn_like(param) for param in self._params_with_grad]
+                [param.add_(v) for (param, v) in zip(self._params_with_grad, vs)]
+                with torch.enable_grad():
+                    perturbed_returns = closure()
+                    perturbed_loss = perturbed_returns if isinstance(perturbed_returns, torch.Tensor) else perturbed_returns[0]
+                    perturbed_grads = torch.autograd.grad(perturbed_loss, self._params_with_grad)
+                Hvs = [perturbed_g - g for (perturbed_g, g) in zip(perturbed_grads, grads)]
+            # update preconditioner
+            v = torch.cat([torch.flatten(v) for v in vs])
+            h = torch.cat([torch.flatten(h) for h in Hvs])
+            if self.exact_hessian_vector_product:
+                update_precond_Xmat_math_(self._a, self._b,
+                                         v, h, step=self.lr_preconditioner, tiny=self._tiny)
+            else:  # compensate the levels of v and h; helpful to reduce numerical errors in half-precision training
+                update_precond_Xmat_math_(self._a, self._b,
+                                         v/self._delta_param_scale, h/self._delta_param_scale,
+                                         step=self.lr_preconditioner, tiny=self._tiny)
+        else:
+            # only evaluates the gradients
+            with torch.enable_grad():
+                closure_returns = closure()
+                loss = closure_returns if isinstance(closure_returns, torch.Tensor) else closure_returns[0]
+                grads = torch.autograd.grad(loss, self._params_with_grad)
+            vs = None  # no vs and Hvs
+
+        # preconditioned gradients
+        grad = torch.cat([torch.flatten(g) for g in grads])
+        pre_grad = precond_grad_Xmat_math(self._a, self._b, grad)
+        # gradient clipping is optional
+        if self.grad_clip_max_norm is None:
+            lr = self.lr_params
+        else:
+            grad_norm = torch.linalg.vector_norm(pre_grad) + self._tiny
+            lr = self.lr_params * min(self.grad_clip_max_norm / grad_norm, 1.0)
+
+        # update the parameters
+        if self.exact_hessian_vector_product or (vs is None):
+            [param.subtract_(lr * pre_grad[j - i:j].view_as(param))
+             for (param, i, j) in zip(self._params_with_grad, self._param_sizes, self._param_cumsizes)]
+        else:  # in this case, do not forget to remove the perturbation on parameters
+            [param.subtract_(lr * pre_grad[j - i:j].view_as(param) + v)
+             for (param, i, j, v) in zip(self._params_with_grad, self._param_sizes, self._param_cumsizes, vs)]
+        # return whatever closure returns
+        return closure_returns
+
+################## end of Xmat preconditioner #################################
