@@ -1,12 +1,20 @@
 ## Pytorch implementation of PSGD 
 ### Scalable black box preconditioners (recent updates)
-[This pdf file](https://drive.google.com/file/d/1CTNx1q67_py87jn-0OI-vSLcsM1K7VsM/view?usp=sharing) documents the math of a few recently developed black box preconditioners. I categorize all of them into three families, and two are new. 
+[This file](https://drive.google.com/file/d/1CTNx1q67_py87jn-0OI-vSLcsM1K7VsM/view?usp=sharing) documents the math of a few recently developed black box preconditioners. I categorize them into three families, and two are new. 
 
-*Matrix free preconditioners*: We can construct highly sparse preconditioners from a low order subgroup of the permutation group. The diagonal or Jacobi preconditioner works, but not good enough ([benchmarked here](https://github.com/lixilinx/psgd_tf/releases/tag/1.3)). The butterfly and X-shape matrix preconditioners perform much better by connecting gradients far away in positions.        
+*Type I: Matrix free preconditioners*. We can construct (not all) highly sparse preconditioners from low order subgroups of the permutation group. 
 
-*Low rank approximation preconditioner*: This group has form Q = U*V'+diag(d), thus simply called the UVd preconditioner. Unlike the standard low rank approximation, this form can fit both ends (large and small) of the spectra of Hessian, and scales to problems with millions of parameters. 
+Subgroup {e} induces the diagonal/Jacobi preconditioner. PSGD reduces to equilibrated SGD and AdaHessian exactly. It works, but not good enough without the help of momentum ([benchmarked here](https://github.com/lixilinx/psgd_tf/releases/tag/1.3)). 
 
-*Preconditioners for affine transform matrices*: Not really black box ones. Just need to wrap previous functional implementations as a class for easy use.    
+Subgroup {e, flipping} induces the X-shape matrices. Subgroup {e, half_len_circular_shifting} induces the butterfly matrices. They all perform well by shortcutting gradients far away in positions. Too many possibilities. Only the subgroup {e, flipping} is implemented for now.  
+
+*Type II: Low rank approximation preconditioner*. This group has form Q = U*V'+diag(d), thus simply called the UVd preconditioner. 
+
+Standard low rank approximation, e.g., P = diag(d) + U*U', can only fit one end of the spectra of Hessian. This form can fit both ends. Hence, a very low order approximation works well for problems with millions of parameters. 
+
+*Type III: Preconditioners for affine transform matrices*. Not really black box ones. Just need to wrap previous functional implementations as a class for easy use. 
+
+This is a rich family, including the preconditioner forms in KFAC and batch normalization as special cases, although conceptually different. PSGD is a far more widely applicable and flexible framework. 
 
 ### An overview
 PSGD (preconditioned stochastic gradient descent) is a general purpose second-order optimization method. PSGD differentiates itself from most existing methods by its inherent abilities of handling nonconvexity and gradient noises. Please refer to the [original paper](https://arxiv.org/abs/1512.04202) for its designing ideas. Compared with the [old implementation](https://github.com/lixilinx/psgd_torch/releases/tag/1.0), this new Pytorch implementation greatly simplifies the usage of Kronecker product preconditioner, and also use torch.jit.script decorator by default. You may also refer to the updated [TensorFlow 2.x PSGD implementation](https://github.com/lixilinx/psgd_tf).
