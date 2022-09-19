@@ -2,11 +2,11 @@
 ### Scalable black box preconditioners (recent updates)
 [This file](https://drive.google.com/file/d/1CTNx1q67_py87jn-0OI-vSLcsM1K7VsM/view?usp=sharing) documents the math of a few recently developed black box preconditioners. I categorize them into three families, and two are new. 
 
-*Type I: Matrix free preconditioners*. We can construct (not all) highly sparse preconditioners from low order subgroups of the permutation group. 
+*Type I: Matrix free preconditioners*. We can construct sparse preconditioners from subgroups of the permutation group. Theoretically, they just reduce to direct sum of smaller groups. But, practically, they can perform well by shortcutting gradients far away in positions.   
 
 Subgroup {e} induces the diagonal/Jacobi preconditioner. PSGD reduces to equilibrated SGD and AdaHessian exactly. It works, but not good enough without the help of momentum ([benchmarked here](https://github.com/lixilinx/psgd_tf/releases/tag/1.3)). 
 
-Subgroup {e, flipping} induces the X-shape matrices. Subgroup {e, half_len_circular_shifting} induces the butterfly matrices. They all perform well by shortcutting gradients far away in positions. Too many possibilities. Only the subgroup {e, flipping} is implemented for now.  
+Subgroup {e, flipping} induces the X-shape matrices. Subgroup {e, half_len_circular_shifting} induces the butterfly matrices. Many possibilities. Only the subgroup {e, flipping} is implemented for now.  
 
 *Type II: Low rank approximation preconditioner*. This group has form Q = U*V'+diag(d), thus simply called the UVd preconditioner. 
 
