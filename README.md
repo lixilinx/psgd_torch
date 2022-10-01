@@ -12,9 +12,11 @@ Subgroup {e, flipping} induces the X-shape matrices. Subgroup {e, half_len_circu
 
 Standard low rank approximation, e.g., P = diag(d) + U*U', can only fit one end of the spectra of Hessian. This form can fit both ends. Hence, a very low order approximation works well for problems with millions of parameters. 
 
-*Type III: Preconditioners for affine transform matrices*. Not really black box ones. Just need to wrap previous functional implementations as a class for easy use. 
+*Type III: Preconditioners for affine transform matrices*. Not really black box ones. This is a rich family, including the preconditioner forms in KFAC and batch normalization as special cases, although conceptually different. PSGD is a far more widely applicable and flexible framework. 
 
-This is a rich family, including the preconditioner forms in KFAC and batch normalization as special cases, although conceptually different. PSGD is a far more widely applicable and flexible framework. 
+The first two families are wrapped as classes for easy use, see [code](https://github.com/lixilinx/psgd_torch/blob/master/rnn_xor_problem_general_purpose_preconditioner.py) for demo. Two main differences from torch.optim.SGD: 
+1) Momentum here is the moving average of gradient so that its setting is decoupled from the learning rate, which is normalized in PSGD; 
+2) Weight decay should be explicitly realized by adding L2 regularization to the loss in the closure.    
 
 ### An overview
 PSGD (preconditioned stochastic gradient descent) is a general purpose second-order optimization method. PSGD differentiates itself from most existing methods by its inherent abilities of handling nonconvexity and gradient noises. Please refer to the [original paper](https://arxiv.org/abs/1512.04202) for its designing ideas. Compared with the [old implementation](https://github.com/lixilinx/psgd_torch/releases/tag/1.0), this new Pytorch implementation greatly simplifies the usage of Kronecker product preconditioner, and also use torch.jit.script decorator by default. You may also refer to the updated [TensorFlow 2.x PSGD implementation](https://github.com/lixilinx/psgd_tf).
@@ -41,7 +43,7 @@ For example, a left or right preconditioner with dimension [*N*, *N*] is dense; 
 
 ### Miscellaneous topics
 
-*No support of higher order derivative for Hessian-vector product calculation*: some modules like Baidu's CTC implementation do not support higher order derivatives, and thus there is no way to calculate the Hessian-vector product exactly. However, you can use numerical method to approximate it as examples in this [archived TF 1.x code](https://github.com/lixilinx/psgd_tf/releases/tag/1.3) and the [original paper](https://arxiv.org/abs/1512.04202). Most likely, there is no big performance difference between the use of exact and approximated Hessian-vector products.  
+*No support of higher order derivative for Hessian-vector product calculation*: some modules like Baidu's CTC implementation do not support higher order derivatives, and thus there is no way to calculate the Hessian-vector product exactly. However, you can use numerical method to approximate it as examples in this [archived TF 1.x code](https://github.com/lixilinx/psgd_tf/releases/tag/1.3) and the [original paper](https://arxiv.org/abs/1512.04202). Most likely, there is no big performance difference between the use of exact and approximate Hessian-vector products.  
 
 *Which preconditioner to use?*: Dense preconditioner for small scaled problems (< 1e4 parameters); (dense, dense) Kronecker product preconditioners for middle scaled problems, where the matrix size is about [1e3, 1e3]; (dense, normalization) or (normalization, dense) Kronecker product preconditioners for large scaled problems involving matrices with sizes up to [1e3, 1e6] or [1e6, 1e3], e.g., the language modeling example in [this paper](https://openreview.net/forum?id=Bye5SiAqKX); eventually, the (scaling, normalization) or (normalization, scaling) Kronecker product preconditioners is sufficiently sparse for matrices with sizes up to [1e6, 1e6] (really too large to be of any real use).
 
