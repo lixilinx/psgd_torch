@@ -6,8 +6,8 @@ import torch
 import preconditioned_stochastic_gradient_descent as psgd
 
 device = torch.device('cpu')
-batch_size, seq_len = 128, 20           # increasing sequence_length
-dim_in, dim_hidden, dim_out = 2, 30, 1  # or decreasing dimension_hidden_layer will make learning harder
+batch_size, seq_len = 128, 16          # increasing sequence_length or decreasing dimension_hidden_layer will make learning harder;
+dim_in, dim_hidden, dim_out = 2, 30, 1  # current setting can solve seq len 80 ~ 90 reliably without the help of momentum 
 
 def generate_train_data():
     x = np.zeros([batch_size, seq_len, dim_in], dtype=np.float32)
@@ -50,17 +50,18 @@ class Model(torch.nn.Module):
         return h @ self.W2 + self.b2
 
 model = Model().to(device)
-# initialize the PSGD optimizer with the low-rank modification preconditioner 
+# initialize the PSGD optimizer with the low-rank approximation preconditioner 
 opt = psgd.UVd(model.parameters(),
-               rank_of_modification=10, preconditioner_init_scale=1.0,
-               lr_params=0.01, lr_preconditioner=0.01,
-               grad_clip_max_norm=1.0, preconditioner_update_probability=1.0,
-               exact_hessian_vector_product=True)
+               # rank_of_approximation=10, preconditioner_init_scale=1.0,
+               # lr_params=0.01, lr_preconditioner=0.01, momentum=0.9,
+               grad_clip_max_norm=1.0, # preconditioner_update_probability=1.0,
+               # exact_hessian_vector_product=True
+               )
 """
 # initialize the PSGD optimizer with the X-matrix preconditioner 
 opt = psgd.XMat(model.parameters(),
                 preconditioner_init_scale=1.0,
-                lr_params=0.01, lr_preconditioner=0.01,
+                lr_params=0.01, lr_preconditioner=0.01, momentum=0.9, 
                 grad_clip_max_norm=1.0, preconditioner_update_probability=1.0,
                 exact_hessian_vector_product=True)
 """
@@ -85,9 +86,10 @@ for num_iter in range(100000):
     loss = opt.step(closure)
     Losses.append(loss.item())
     print('Iteration: {}; loss: {}'.format(num_iter, Losses[-1]))
-    if num_iter+1 == 1000: # feel free to reschedule these mutable settings
+    if num_iter+1 == 1000: # feel free to reschedule these mutable settings on the fly 
         # opt.lr_params = 0.01
         # opt.lr_preconditioner = 0.01
+        # opt.momentum = 0.0
         # opt.grad_clip_max_norm = 1.0
         # opt.preconditioner_update_probability = 1.0
         opt.exact_hessian_vector_product = False
