@@ -507,7 +507,7 @@ def precond_grad_splu(L12, l3, U12, u3, grads):
 
 ##############################################################################
 #
-# The low-rank modification (UVd) preconditioner is defined by
+# The low-rank approximation (UVd) preconditioner is defined by
 #
 #   Q = (I + U*V')*diag(d)
 #
@@ -568,7 +568,7 @@ def update_precond_UVd_math_(U, V, d, v, h, step, tiny):
     I = torch.eye(VtU.size(dim=0), dtype=VtU.dtype, device=VtU.device)
     IpVtU = I + VtU
     invQtv = v/d
-    # torch uses LU decomposition for linalg.solve; slow even for tiny mtx
+    # torch's linalg.solve is slow for small matrix
     invQtv = invQtv - V.mm(torch.linalg.solve(IpVtU.t(), U.t().mm(invQtv)))  
     invPv  = invQtv - U.mm(torch.linalg.solve(IpVtU,     V.t().mm(invQtv)))
     invPv = invPv/d
@@ -630,18 +630,19 @@ def precond_grad_UVd_math(U, V, d, g):
 
 class UVd:
     """
-    Implements the low-rank modification (UVd) preconditioner, Q = U*V' + diag(d), as a class.
+    Implements the low-rank approximation (UVd) preconditioner, Q = (I + U*V')*diag(d), as a class.
 
     Args for initialization:
         params_with_grad: a list of parameters or variables requiring gradients;
-        rank_of_modification: rank of modification, i.e., rank of U or V;
+        rank_of_approximation: rank of approximation, i.e., rank of U or V;
         preconditioner_init_scale: initial scale of Q, or roughly, Q = preconditioner_init_scale*eye();
         lr_params: normalized learning rate for parameters in range [0, 1];
         lr_preconditioner: normalized learning rate for preconditioner in range [0, 1];
+        momentum: momentum factor in range [0,1);
         grad_clip_max_norm: maximum allowable gradient norm after clipping, None for no clipping;
         preconditioner_update_probability: probability on updating Q, 1 for updating at every step, and 0 for never;
         exact_hessian_vector_product: True for exact Hessian-vector product via 2nd derivative,
-                                    and False for approximated one via finite-difference formulae.
+                                    and False for approximate one via finite-difference formulae.
 
     Notes:
         Note 1: The Hessian-vector product can be approximated using the finite-difference formulae by setting 
@@ -650,24 +651,28 @@ class UVd:
         except for numerical errors due to non-deterministic behaviors.
         Random numbers, if any, used inside the closure should be generated starting from the same state, where the rng state can be
         read and set by, e.g., `torch.cuda.get_rng_state' and `torch.cuda.set_rng_state', respectively.
+        
+        Note 2: Momentum here is the moving average of gradient so that its setting is decoupled from the learning rate.
+        This is necessary as the learning rate in PSGD is normalized. 
 
-        Note 2: `torch.linalg.solve' is called twice in function `update_precond_UVd_math_'.
+        Note 3: `torch.linalg.solve' is called twice in function `update_precond_UVd_math_'.
         Certain solver could be orders of magnitude faster than others, especially for small matrices (see the pdf file).
         Considering replace it with faster ones if the default solver is too slow.
 
-        Note 3: currently, no support of sparse and mixed-precision gradients. 
+        Note 4: Currently, no support of sparse and mixed-precision gradients. 
         Half precision is supported except that torch.linalg.solve (v1.12) requires casting float16 to float32.    
         
-        Note 4: lr_params, lr_preconditioner, grad_clip_max_norm, preconditioner_update_probability, and 
-        exact_hessian_vector_product (bool) can be reset after initialization. 
+        Note 5: lr_params, lr_preconditioner, momentum, grad_clip_max_norm, preconditioner_update_probability, and 
+        exact_hessian_vector_product (bool) all can be reset on the fly. 
     """
-    def __init__(self,  params_with_grad, rank_of_modification:int=10, preconditioner_init_scale=1.0,
-                        lr_params=0.01, lr_preconditioner=0.01,
+    def __init__(self,  params_with_grad, rank_of_approximation:int=10, preconditioner_init_scale=1.0,
+                        lr_params=0.01, lr_preconditioner=0.01, momentum=0.0,
                         grad_clip_max_norm=None, preconditioner_update_probability=1.0,
                         exact_hessian_vector_product:bool=True):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner
+        self.momentum = momentum if (0<momentum<1) else 0.0
         self.grad_clip_max_norm = grad_clip_max_norm
         self.preconditioner_update_probability = preconditioner_update_probability
         self.exact_hessian_vector_product = exact_hessian_vector_product
@@ -680,14 +685,16 @@ class UVd:
         self._param_sizes = [torch.numel(param) for param in self._params_with_grad]
         self._param_cumsizes = torch.cumsum(torch.tensor(self._param_sizes), 0)
         num_params = self._param_cumsizes[-1]
-        self._U = torch.randn(num_params, rank_of_modification, dtype=dtype, device=device) / (num_params*rank_of_modification)**0.5
-        self._V = torch.randn(num_params, rank_of_modification, dtype=dtype, device=device) / (num_params*rank_of_modification)**0.5
+        self._U = torch.randn(num_params, rank_of_approximation, dtype=dtype, device=device) / (num_params*rank_of_approximation)**0.5
+        self._V = torch.randn(num_params, rank_of_approximation, dtype=dtype, device=device) / (num_params*rank_of_approximation)**0.5
         self._d = torch.ones( num_params, 1, dtype=dtype, device=device) * preconditioner_init_scale
+        self._m = None # momentum buffer 
+
 
     @torch.no_grad()
     def step(self, closure):
         """
-        Performs a single step of PSGD with low-rank modification (UVd) preconditioner, i.e., 
+        Performs a single step of PSGD with low-rank approximation (UVd) preconditioner, i.e., 
         updating the trainable parameters once, and returning what closure returns.
 
         Args:
@@ -736,9 +743,18 @@ class UVd:
                 grads = torch.autograd.grad(loss, self._params_with_grad)
             vs = None # no vs and Hvs
 
-        # preconditioned gradients
+        # preconditioned gradients; momentum is optional
         grad = torch.cat([torch.flatten(g) for g in grads])
-        pre_grad = precond_grad_UVd_math(self._U, self._V, self._d, grad[:, None])
+        if self.momentum > 0:
+            if self._m is None:
+                self._m = (1 - self.momentum)*grad
+            else:
+                self._m.mul_(self.momentum).add_((1 - self.momentum)*grad)
+            pre_grad = precond_grad_UVd_math(self._U, self._V, self._d, self._m[:, None])
+        else:
+            self._m = None # clean the buffer when momentum is set to zero 
+            pre_grad = precond_grad_UVd_math(self._U, self._V, self._d, grad[:, None])
+            
         # gradient clipping is optional
         if self.grad_clip_max_norm is None:
             lr = self.lr_params
@@ -765,7 +781,7 @@ class UVd:
 #   Q = diag(a) + adiag(b)
 #
 # where adiag means anti-diagonal.
-# It's slightly more complicated than a diagonal preconditioner, but performs much better.
+# It's slightly more complicated than a diagonal preconditioner, but performs better.
 #
 
 #@torch.jit.script
@@ -806,10 +822,11 @@ class XMat:
         preconditioner_init_scale: initial scale of Q, i.e., Q = preconditioner_init_scale*eye();
         lr_params: normalized learning rate for parameters in range [0, 1];
         lr_preconditioner: normalized learning rate for preconditioner in range [0, 1];
+        momentum: momentum factor in range [0,1);
         grad_clip_max_norm: maximum allowable gradient norm after clipping, None for no clipping;
-        preconditioner_update_probability: probability on updating Q, 1 for updating at every step, and 0 for never;
+        preconditioner_update_probability: probability on updating Q, 1 for updating at every step, and 0 for never, i.e., SGD;
         exact_hessian_vector_product: True for exact Hessian-vector product via 2nd derivative,
-                                    and False for approximated one via finite-difference formulae.
+                                    and False for approximate one via finite-difference formulae.
     Notes:
         Note 1: The Hessian-vector product can be approximated using the finite-difference formulae by setting
         exact_hessian_vector_product = False when the 2nd derivatives is not available.
@@ -817,20 +834,23 @@ class XMat:
         except for numerical errors due to non-deterministic behaviors.
         Random numbers, if any, used inside the closure should be generated starting from the same state, where the rng state can be
         read and set by, e.g., `torch.cuda.get_rng_state' and `torch.cuda.set_rng_state', respectively.
+        
+        Note 2: Momentum here is the moving average of gradient so that its setting is decoupled from the learning rate.
+        This is necessary as the learning rate in PSGD is normalized.
 
-        Note 2: currently, no support of sparse and mixed-precision gradients.
+        Note 3: Currently, no support of sparse and mixed-precision gradients.
 
-        Note 3: lr_params, lr_preconditioner, grad_clip_max_norm, preconditioner_update_probability, and
-        exact_hessian_vector_product (bool) can be reset after initialization.
+        Note 4: lr_params, lr_preconditioner, momentum, grad_clip_max_norm, preconditioner_update_probability, and
+        exact_hessian_vector_product (bool) all can be reset on the fly.
     """
-
     def __init__(self, params_with_grad, preconditioner_init_scale=1.0,
-                 lr_params=0.01, lr_preconditioner=0.01,
+                 lr_params=0.01, lr_preconditioner=0.01, momentum=0.0, 
                  grad_clip_max_norm=None, preconditioner_update_probability=1.0,
                  exact_hessian_vector_product: bool = True):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner
+        self.momentum = momentum if (0<momentum<1) else 0.0
         self.grad_clip_max_norm = grad_clip_max_norm
         self.preconditioner_update_probability = preconditioner_update_probability
         self.exact_hessian_vector_product = exact_hessian_vector_product
@@ -845,6 +865,7 @@ class XMat:
         num_params = self._param_cumsizes[-1]
         self._a = torch.ones(num_params, dtype=dtype, device=device)*preconditioner_init_scale
         self._b = torch.zeros(num_params, dtype=dtype, device=device)
+        self._m = None # buffer for momentum 
 
     @torch.no_grad()
     def step(self, closure):
@@ -898,9 +919,18 @@ class XMat:
                 grads = torch.autograd.grad(loss, self._params_with_grad)
             vs = None  # no vs and Hvs
 
-        # preconditioned gradients
+        # preconditioned gradients; momentum is optional        
         grad = torch.cat([torch.flatten(g) for g in grads])
-        pre_grad = precond_grad_Xmat_math(self._a, self._b, grad)
+        if self.momentum > 0:
+            if self._m is None:
+                self._m = (1 - self.momentum)*grad
+            else:
+                self._m.mul_(self.momentum).add_((1 - self.momentum)*grad)
+            pre_grad = precond_grad_Xmat_math(self._a, self._b, self._m)
+        else:
+            self._m = None # clean the buffer when momentum is set to zero again 
+            pre_grad = precond_grad_Xmat_math(self._a, self._b, grad)
+        
         # gradient clipping is optional
         if self.grad_clip_max_norm is None:
             lr = self.lr_params
@@ -919,3 +949,4 @@ class XMat:
         return closure_returns
 
 ################## end of Xmat preconditioner #################################
+
