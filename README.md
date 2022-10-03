@@ -14,9 +14,12 @@ Standard low rank approximation, e.g., P = diag(d) + U*U', can only fit one end 
 
 *Type III: Preconditioners for affine transform matrices*. Not really black box ones. This is a rich family, including the preconditioner forms in KFAC and batch normalization as special cases, although conceptually different. PSGD is a far more widely applicable and flexible framework. 
 
-The first two families are wrapped as classes for easy use, see [code](https://github.com/lixilinx/psgd_torch/blob/master/rnn_xor_problem_general_purpose_preconditioner.py) for demo. Two main differences from torch.optim.SGD: 
-1) Momentum here is the moving average of gradient so that its setting is decoupled from the learning rate, which is normalized in PSGD; 
-2) Weight decay should be explicitly realized by adding L2 regularization to the loss in the closure.    
+The first two families are wrapped as classes for easy use. Three main differences from torch.optim.SGD: 
+1) The loss to be minimized is passed as a closure to the optimizer to support more complicated behaviors, notably, second order derivative approximation via finite-difference formulae;   
+2) Momentum here is the moving average of gradient so that its setting is decoupled from the learning rate, which is always normalized in PSGD; 
+3) As any other regularizations, weight decay should be explicitly realized by adding L2 regularization to the loss in the closure.
+
+To me, these make the code closer to the math behind it. For example, [this file](https://github.com/lixilinx/psgd_torch/blob/master/misc/cifar10_resnet.py) demos the usage of PSGD to CIFAR10 with ResNet (surely PSGD consistently outperforms SGD). 
 
 ### An overview
 PSGD (preconditioned stochastic gradient descent) is a general purpose second-order optimization method. PSGD differentiates itself from most existing methods by its inherent abilities of handling nonconvexity and gradient noises. Please refer to the [original paper](https://arxiv.org/abs/1512.04202) for its designing ideas. Compared with the [old implementation](https://github.com/lixilinx/psgd_torch/releases/tag/1.0), this new Pytorch implementation greatly simplifies the usage of Kronecker product preconditioner, and also use torch.jit.script decorator by default. You may also refer to the updated [TensorFlow 2.x PSGD implementation](https://github.com/lixilinx/psgd_tf).
