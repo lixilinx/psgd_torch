@@ -11,6 +11,9 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 import preconditioned_stochastic_gradient_descent as psgd
 
 device = torch.device("cuda:0")
+# optimizer = 'SGD'
+# optimizer = 'PSGD XMat'
+optimizer = 'PSGD UVd'
 
 print(
     """
@@ -20,9 +23,20 @@ print(
       One main difference is that I anneal the learning rate twice.
       This change is not helpful to PSGD, but benefits the SGD baseline a lot.
       It increases the test accuracy of SGD by about 1%.
+      
+      Replacing ReLU with (x+sqrt(x^2+eps))/2 helps to deliver the correct rounding behavior 
+      for derivatives around 0, where eps is the machine precision. 
+      This helps PSGD to give a finer preconditioner estimation.   
       """
 )
 
+def soft_lrelu(x):
+    # Reducing to ReLU when a=0.5 and e=0
+    # Here, we set a-->0.5 from left and e-->0 from right,
+    # where adding eps is to make the derivatives have the corrrect rounding behavior around 0. 
+    a = (1 - 0.01)/2 
+    e = torch.finfo(torch.float32).eps**0.5
+    return (1-a)*x + a*torch.sqrt(x*x + e*e) - a*e
 
 def build_dataset(batchsize):
     print("==> Preparing data..")
@@ -89,10 +103,10 @@ class BasicBlock(nn.Module):
             )
 
     def forward(self, x):
-        out = F.relu(self.bn1(self.conv1(x)))
+        out = soft_lrelu(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
         out += self.shortcut(x)
-        out = F.relu(out)
+        out = soft_lrelu(out)
         return out
 
 
@@ -126,11 +140,11 @@ class Bottleneck(nn.Module):
             )
 
     def forward(self, x):
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = F.relu(self.bn2(self.conv2(out)))
+        out = soft_lrelu(self.bn1(self.conv1(x)))
+        out = soft_lrelu(self.bn2(self.conv2(out)))
         out = self.bn3(self.conv3(out))
         out += self.shortcut(x)
-        out = F.relu(out)
+        out = soft_lrelu(out)
         return out
 
 
@@ -156,7 +170,7 @@ class ResNet(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
-        out = F.relu(self.bn1(self.conv1(x)))
+        out = soft_lrelu(self.bn1(self.conv1(x)))
         out = self.layer1(out)
         out = self.layer2(out)
         out = self.layer3(out)
@@ -210,30 +224,31 @@ def test(net, device, data_loader, criterion):
 
 net = ResNet18().to(device)
 
-# # SGD baseline
-# L2 = 2.5e-4 # 2*L2 is the weight decay
-# opt = psgd.XMat(
-#     net.parameters(),
-#     lr_params = 1.0, # note that momentum in PSGD is the moving average of gradient
-#     momentum = 0.9,  # so lr 0.1 becomes 1 when momentum factor is 0.9
-#     preconditioner_update_probability = 0.0, # PSGD reduces to SGD
-# )
-
-# # PSGD with X-shape matrix preconditioner
-# L2 = 1e-2 # 2*L2 is the weight decay
-# opt = psgd.XMat(
-#     net.parameters(),
-#     momentum = 0.9,
-#     preconditioner_update_probability = 0.1,
-# )
-
-# PSGD with low rank approximation preconditioner
-L2 = 1e-2  # 2*L2 is the weight decay
-opt = psgd.UVd(
-    net.parameters(),
-    momentum = 0.9,
-    preconditioner_update_probability = 0.1,
-)
+if optimizer == 'SGD':
+    # SGD baseline
+    L2 = 2.5e-4 # 2*L2 is the weight decay
+    opt = psgd.XMat(
+        net.parameters(),
+        lr_params = 1.0, # note that momentum in PSGD is the moving average of gradient
+        momentum = 0.9,  # so lr 0.1 becomes 1 when momentum factor is 0.9
+        preconditioner_update_probability = 0.0, # PSGD reduces to SGD when P = eye()
+    )
+elif optimizer == 'PSGD XMat':
+    # PSGD with X-shape matrix preconditioner
+    L2 = 1e-2 # 2*L2 is the weight decay
+    opt = psgd.XMat(
+        net.parameters(),
+        momentum = 0.9,
+        preconditioner_update_probability = 0.1,
+    )
+else:
+    # PSGD with low rank approximation preconditioner
+    L2 = 1e-2  # 2*L2 is the weight decay
+    opt = psgd.UVd(
+        net.parameters(),
+        momentum = 0.9,
+        preconditioner_update_probability = 0.1,
+    )
 
 train_loader, test_loader = build_dataset(128)
 
