@@ -24,9 +24,8 @@ print(
       This change is not helpful to PSGD, but benefits the SGD baseline a lot.
       It increases the test accuracy of SGD by about 1%.
       
-      Replacing ReLU with (x+sqrt(x^2+eps))/2 helps to deliver the correct rounding behavior 
-      for derivatives around 0, where eps is the machine precision. 
-      This helps PSGD to give a finer preconditioner estimation.   
+      Replacing ReLU with (x+sqrt(x^2+eps^2)-eps)/2 helps to deliver the correct rounding behavior 
+      for derivatives around 0, where eps is the machine precision.   
       """
 )
 
@@ -34,8 +33,8 @@ def soft_lrelu(x):
     # Reducing to ReLU when a=0.5 and e=0
     # Here, we set a-->0.5 from left and e-->0 from right,
     # where adding eps is to make the derivatives have the corrrect rounding behavior around 0. 
-    a = (1 - 0.01)/2 
-    e = torch.finfo(torch.float32).eps**0.5
+    a = 0.49 
+    e = torch.finfo(torch.float32).eps
     return (1-a)*x + a*torch.sqrt(x*x + e*e) - a*e
 
 def build_dataset(batchsize):
