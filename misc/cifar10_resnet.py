@@ -1,5 +1,6 @@
 import os
 import sys
+import math
 
 import torch
 import torch.nn as nn
@@ -11,28 +12,101 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 import preconditioned_stochastic_gradient_descent as psgd
 
 device = torch.device("cuda:0")
+
 # optimizer = 'SGD'
-# optimizer = 'PSGD XMat'
-optimizer = 'PSGD UVd'
+optimizer = 'PSGD XMat'
+# optimizer = 'PSGD UVd'
+
+lr_scheduler = 'stage'
+# lr_scheduler = 'cos'
+
+if optimizer == 'SGD':
+    lr0 = 1.0   # 0.1 -> 1.0 when momentum factor = 0.9 as momentum in PSGD is moving-averaged gradient 
+    decay = 5e-4
+else:    
+    lr0 = 2e-2
+    decay = 2e-2
+    
 
 print(
     """
       The code is adapted from the Adabelief implementation at
           https://github.com/juntang-zhuang/Adabelief-Optimizer
-
-      One main difference is that I anneal the learning rate twice.
-      This change is not helpful to PSGD, but benefits the SGD baseline a lot.
-      It increases the test accuracy of SGD by about 1%.
+          
+      We test three optimizers: SGD, and PSGD with the Xmat and UVd preconditioners.
+      Two learning rate schedulers: three-stage annealing and cosine annealling. 
       
-      Replacing ReLU with (x+sqrt(x^2+eps^2)-eps)/2 helps to deliver the correct rounding behavior 
-      for derivatives around 0, where eps is the machine precision.   
+      Minor change 1: replacing ReLU(x) with 0.51*x + 0.49*sqrt(x^2 + eps^2) helps to round  
+      the derivatives around 0 for better numerical behaviors. 
+      Minor change 2: replacing L2 regularization 0.5*decay*x^2 with decay*rand()*x^2 seems help.
+      
+      Test accuracies of a few runs with resnet18:
+          
+        algorithm   lr_scheduler    lr0         weight_decay    test_accuracy
+    
+        SGD         stage           1e0         5e-4            95.13
+        SGD         stage           1e0         5e-4            95.02
+        SGD         stage           1e0         5e-4            95.35
+        SGD         stage           1e0         5e-4            94.96
+        SGD         stage           1e0         5e-4            95.02
+        SGD         stage           1e0         5e-4            95.04
+        SGD         stage           1e0         5e-4            94.83
+                                                                        95.05+-0.15
+        
+        PSGD(UVd)   stage           2e-2        2e-2            95.45      
+        PSGD(UVd)   stage           2e-2        2e-2            95.35
+        PSGD(UVd)   stage           2e-2        2e-2            95.57  
+        PSGD(UVd)   stage           2e-2        2e-2            95.45
+        PSGD(UVd)   stage           2e-2        2e-2            95.48
+        PSGD(UVd)   stage           2e-2        2e-2            95.55
+        PSGD(Xmat)  stage           2e-2        2e-2            95.57 
+        PSGD(Xmat)  stage           2e-2        2e-2            95.49 
+        PSGD(Xmat)  stage           2e-2        2e-2            95.38
+        PSGD(Xmat)  stage           2e-2        2e-2            95.50
+        PSGD(UVd)   stage           3e-2        2e-2            95.46
+                                                                        95.48+-0.07
+
+        
+        SGD         cos             1e0         5e-4            95.24
+        SGD         cos             1e0         5e-4            95.65
+        SGD         cos             1e0         5e-4            95.25
+        SGD         cos             1e0         5e-4            95.50
+        SGD         cos             1e0         5e-4            95.58
+        SGD         cos             1e0         5e-4            95.59
+        SGD         cos             1e0         5e-4            95.38
+        SGD         cos             1e0         5e-4            95.38
+        SGD         cos             1e0         5e-4            95.53 
+        SGD         cos             1e0         5e-4            95.64
+                                                                        95.47+-0.14
+        
+        PSGD(UVd)   cos             2e-2        2e-2            95.55
+        PSGD(UVd)   cos             2e-2        2e-2            95.44
+        PSGD(UVd)   cos             2e-2        2e-2            95.56
+        PSGD(UVd)   cos             2e-2        2e-2            95.50
+        PSGD(UVd)   cos             2e-2        2e-2            95.45
+        PSGD(XMat)  cos             2e-2        2e-2            95.45
+        PSGD(XMat)  cos             2e-2        2e-2            95.42
+        PSGD(XMat)  cos             2e-2        2e-2            95.69 
+        PSGD(XMat)  cos             2e-2        2e-2            95.32
+        PSGD(UVd)   cos             5e-2        2e-2            95.48
+        PSGD(UVd)   cos             5e-2        2e-2            95.46
+        PSGD(UVd)   cos             4e-2        2e-2            95.55
+        PSGD(UVd)   cos             3e-2        2e-2            95.57
+        PSGD(UVd)   cos             2e-2        1e-2            95.45
+        PSGD(UVd)   cos             2e-2        3e-2            95.51
+                                                                        95.49+-0.08
+            
+      SGD with the cosine annealing is very competitive. 
+      Still, PSGD clearly outperforms SGD with a three-stage lr scheduler. 
+      PSGD also is far less sensitive to the way of weight decaying 
+      (coupled here, and two more decoupled ways). 
       """
 )
 
 def soft_lrelu(x):
     # Reducing to ReLU when a=0.5 and e=0
     # Here, we set a-->0.5 from left and e-->0 from right,
-    # where adding eps is to make the derivatives have the corrrect rounding behavior around 0. 
+    # where adding eps is to make the derivatives have better rounding behavior around 0. 
     a = 0.49 
     e = torch.finfo(torch.float32).eps
     return (1-a)*x + a*torch.sqrt(x*x + e*e) - a*e
@@ -225,26 +299,25 @@ net = ResNet18().to(device)
 
 if optimizer == 'SGD':
     # SGD baseline
-    L2 = 2.5e-4 # 2*L2 is the weight decay
     opt = psgd.XMat(
         net.parameters(),
-        lr_params = 1.0, # note that momentum in PSGD is the moving average of gradient
+        lr_params = lr0, # note that momentum in PSGD is the moving average of gradient
         momentum = 0.9,  # so lr 0.1 becomes 1 when momentum factor is 0.9
         preconditioner_update_probability = 0.0, # PSGD reduces to SGD when P = eye()
     )
 elif optimizer == 'PSGD XMat':
     # PSGD with X-shape matrix preconditioner
-    L2 = 1e-2 # 2*L2 is the weight decay
     opt = psgd.XMat(
         net.parameters(),
+        lr_params = lr0,
         momentum = 0.9,
         preconditioner_update_probability = 0.1,
     )
 else:
     # PSGD with low rank approximation preconditioner
-    L2 = 1e-2  # 2*L2 is the weight decay
     opt = psgd.UVd(
         net.parameters(),
+        lr_params = lr0,
         momentum = 0.9,
         preconditioner_update_probability = 0.1,
     )
@@ -256,6 +329,15 @@ num_epoch = 200
 train_accs = []
 test_accs = []
 for epoch in range(num_epoch):
+    if lr_scheduler == 'cos':
+        opt.lr_params = lr0*(1 + math.cos(math.pi*epoch/num_epoch))/2
+    else:
+        # schedule the learning rate
+        if epoch == int(num_epoch * 0.7):
+            opt.lr_params *= 0.1
+        if epoch == int(num_epoch * 0.9):
+            opt.lr_params *= 0.1
+    
     net.train()  # do not forget it as there is BN
     total = 0
     train_loss = 0
@@ -268,8 +350,8 @@ for epoch in range(num_epoch):
             Weight decaying is explicitly realized by adding L2 regularization to the loss
             """
             outputs = net(inputs)
-            loss = criterion(outputs, targets) + L2 * sum(
-                [torch.sum(param * param) for param in net.parameters()]
+            loss = criterion(outputs, targets) + sum(
+                [torch.sum(decay * torch.rand_like(param) * param * param) for param in net.parameters()]
             )
             return [loss, outputs]
 
@@ -286,12 +368,6 @@ for epoch in range(num_epoch):
             epoch + 1, train_loss, train_accuracy, test_accuracy
         )
     )
-
-    # schedule the learning rate
-    if epoch + 1 == int(num_epoch * 0.7):
-        opt.lr_params *= 0.1
-    if epoch + 1 == int(num_epoch * 0.9):
-        opt.lr_params *= 0.1
 
     train_accs.append(train_accuracy)
     test_accs.append(test_accuracy)
