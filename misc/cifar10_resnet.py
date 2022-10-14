@@ -1,6 +1,6 @@
-import os
 import sys
 import math
+import argparse 
 
 import torch
 import torch.nn as nn
@@ -8,39 +8,51 @@ import torch.nn.functional as F
 import torchvision
 from torchvision import transforms
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+sys.path.append("..")
 import preconditioned_stochastic_gradient_descent as psgd
 
-device = torch.device("cuda:0")
+parser = argparse.ArgumentParser()
+parser.add_argument("device",                           help="for example, cuda:0")
+parser.add_argument("optimizer",                        help="choices are SGD, PSGD_XMat and PSGD_UVd")
+parser.add_argument("lr_scheduler",                     help="choices are stage and cos")
+parser.add_argument("shortcut_connection", type=int,    help="choices are 0 and 1")
 
-# optimizer = 'SGD'
-optimizer = 'PSGD XMat'
-# optimizer = 'PSGD UVd'
-
-lr_scheduler = 'stage'
-# lr_scheduler = 'cos'
+args = parser.parse_args()
+device = torch.device(args.device)
+optimizer = args.optimizer
+lr_scheduler = args.lr_scheduler
+shortcut_connection = bool(args.shortcut_connection)
+print("Device: \t\t\t{}".format(device))
+print("Optimizer: \t\t\t{}".format(optimizer))
+print("Learning rate schedular:\t{}".format(lr_scheduler))
+print("With short connections: \t{}".format(shortcut_connection))
 
 if optimizer == 'SGD':
-    lr0 = 1.0   # 0.1 -> 1.0 when momentum factor = 0.9 as momentum in PSGD is moving-averaged gradient 
+    lr0 = 1.0   # 0.1 -> 1.0 when momentum factor = 0.9 as momentum in PSGD is the moving average of gradient 
     decay = 5e-4
-else:    
+else: # PSGD_XMat or PSGD_UVd    
     lr0 = 2e-2
-    decay = 2e-2
+    if shortcut_connection:
+        decay = 2e-2
+    else:
+        decay = 1e-2
     
-
-print(
+#print(
     """
       The code is adapted from the Adabelief implementation at
           https://github.com/juntang-zhuang/Adabelief-Optimizer
           
-      We test three optimizers: SGD, and PSGD with the Xmat and UVd preconditioners.
+      We test three optimizers: SGD, PSGD_XMat and PSGD_UVd (PSGD with the two preconditioners).
       Two learning rate schedulers: three-stage annealing and cosine annealling. 
+      Two variations: with and without the shortcut connections. 
       
       Minor change 1: replacing ReLU(x) with 0.51*x + 0.49*sqrt(x^2 + eps^2) helps to round  
       the derivatives around 0 for better numerical behaviors. 
       Minor change 2: replacing L2 regularization 0.5*decay*x^2 with decay*rand()*x^2 seems help.
       
       Test accuracies of a few runs with resnet18:
+          
+      WITH SHORTCUT CONNECTIONS
           
         algorithm   lr_scheduler    lr0         weight_decay    test_accuracy
     
@@ -65,7 +77,6 @@ print(
         PSGD(Xmat)  stage           2e-2        2e-2            95.50
         PSGD(UVd)   stage           3e-2        2e-2            95.46
                                                                         95.48+-0.07
-
         
         SGD         cos             1e0         5e-4            95.24
         SGD         cos             1e0         5e-4            95.65
@@ -95,13 +106,41 @@ print(
         PSGD(UVd)   cos             2e-2        1e-2            95.45
         PSGD(UVd)   cos             2e-2        3e-2            95.51
                                                                         95.49+-0.08
+                                                                        
+      REMOVE SHORTCUT CONNECTIONS
+     
+        SGD         cos             1e0         5e-4            94.92
+        SGD         cos             1e0         5e-4            95.21
+        SGD         cos             1e0         5e-4            94.80
+        SGD         cos             1e0         5e-4            95.07
+        SGD         cos             1e0         5e-4            94.93
+        SGD         cos             1e0         5e-4            94.87
+        SGD         cos             1e0         5e-4            94.88
+        SGD         cos             1e0         5e-4            95.16
+        SGD         cos             1e0         5e-4            94.92
+        SGD         cos             1e0         5e-4            95.02
+        SGD         cos             1e0         5e-4            94.82
+        SGD         cos             1e0         5e-4            95.12
+                                                                        94.98+-0.13
+                                                                        
+        PSGD(UVd)   cos             2e-2        1e-2            95.53
+        PSGD(UVd)   cos             2e-2        1e-2            95.38
+        PSGD(UVd)   cos             2e-2        1e-2            95.31
+        PSGD(UVd)   cos             2e-2        1e-2            95.46
+        PSGD(UVd)   cos             2e-2        1e-2            95.21
+        PSGD(UVd)   cos             2e-2        1e-2            95.54
+        PSGD(UVd)   cos             2e-2        1e-2            95.30
+        PSGD(UVd)   cos             2e-2        1e-2            95.39
+        PSGD(XMat)  cos             2e-2        1e-2            95.44
+        PSGD(XMat)  cos             2e-2        1e-2            95.33
+        PSGD(XMat)  cos             2e-2        1e-2            95.39
+        PSGD(XMat)  cos             2e-2        1e-2            95.44
+                                                                        95.39+-0.09
             
-      SGD with the cosine annealing is very competitive. 
-      Still, PSGD clearly outperforms SGD with a three-stage lr scheduler. 
-      PSGD also is far less sensitive to the way of weight decaying 
+      PSGD also is less sensitive to the way of weight decaying 
       (coupled here, and two more decoupled ways). 
       """
-)
+#)
 
 def soft_lrelu(x):
     # Reducing to ReLU when a=0.5 and e=0
@@ -162,23 +201,25 @@ class BasicBlock(nn.Module):
         )
         self.bn2 = nn.BatchNorm2d(planes)
 
-        self.shortcut = nn.Sequential()
-        if stride != 1 or in_planes != self.expansion * planes:
-            self.shortcut = nn.Sequential(
-                nn.Conv2d(
-                    in_planes,
-                    self.expansion * planes,
-                    kernel_size=1,
-                    stride=stride,
-                    bias=False,
-                ),
-                nn.BatchNorm2d(self.expansion * planes),
-            )
+        if shortcut_connection:
+            self.shortcut = nn.Sequential()
+            if stride != 1 or in_planes != self.expansion * planes:
+                self.shortcut = nn.Sequential(
+                    nn.Conv2d(
+                        in_planes,
+                        self.expansion * planes,
+                        kernel_size=1,
+                        stride=stride,
+                        bias=False,
+                    ),
+                    nn.BatchNorm2d(self.expansion * planes),
+                )
 
     def forward(self, x):
         out = soft_lrelu(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
-        out += self.shortcut(x)
+        if shortcut_connection:
+            out += self.shortcut(x)
         out = soft_lrelu(out)
         return out
 
@@ -199,24 +240,26 @@ class Bottleneck(nn.Module):
         )
         self.bn3 = nn.BatchNorm2d(self.expansion * planes)
 
-        self.shortcut = nn.Sequential()
-        if stride != 1 or in_planes != self.expansion * planes:
-            self.shortcut = nn.Sequential(
-                nn.Conv2d(
-                    in_planes,
-                    self.expansion * planes,
-                    kernel_size=1,
-                    stride=stride,
-                    bias=False,
-                ),
-                nn.BatchNorm2d(self.expansion * planes),
-            )
+        if shortcut_connection:
+            self.shortcut = nn.Sequential()
+            if stride != 1 or in_planes != self.expansion * planes:
+                self.shortcut = nn.Sequential(
+                    nn.Conv2d(
+                        in_planes,
+                        self.expansion * planes,
+                        kernel_size=1,
+                        stride=stride,
+                        bias=False,
+                    ),
+                    nn.BatchNorm2d(self.expansion * planes),
+                )
 
     def forward(self, x):
         out = soft_lrelu(self.bn1(self.conv1(x)))
         out = soft_lrelu(self.bn2(self.conv2(out)))
         out = self.bn3(self.conv3(out))
-        out += self.shortcut(x)
+        if shortcut_connection:
+            out += self.shortcut(x)
         out = soft_lrelu(out)
         return out
 
@@ -305,7 +348,7 @@ if optimizer == 'SGD':
         momentum = 0.9,  # so lr 0.1 becomes 1 when momentum factor is 0.9
         preconditioner_update_probability = 0.0, # PSGD reduces to SGD when P = eye()
     )
-elif optimizer == 'PSGD XMat':
+elif optimizer == 'PSGD_XMat':
     # PSGD with X-shape matrix preconditioner
     opt = psgd.XMat(
         net.parameters(),
@@ -322,7 +365,10 @@ else:
         preconditioner_update_probability = 0.1,
     )
 
-train_loader, test_loader = build_dataset(128)
+if shortcut_connection:
+    train_loader, test_loader = build_dataset(128)
+else:
+    train_loader, test_loader = build_dataset(64)
 
 criterion = nn.CrossEntropyLoss()
 num_epoch = 200
