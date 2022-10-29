@@ -19,7 +19,7 @@ The first two families are wrapped as classes for easy use. Three main differenc
 2) Momentum here is the moving average of gradient so that its setting is decoupled from the learning rate, which is always normalized in PSGD; 
 3) As any other regularizations, (coupled) weight decay should be explicitly realized by adding L2 regularization to the loss in the closure. Decoupled weight decay can be realized by adding decay\*param to the gradient either before preconditioning (scaling invariant penalty 0.5\*decay\*param\*inv(Hessian)\*param) or after preconditioning (penalty 0.5\*decay\*param^2 as in coupled weight decay).    
 
-[This file](https://github.com/lixilinx/psgd_torch/blob/master/misc/cifar10_resnet.py) benchmarks the performance of PSGD on CIFAR10 with ResNet18, and demonstrates its usage. 
+Folder [misc](https://github.com/lixilinx/psgd_torch/tree/master/misc) has a few more examples demonstrating the usage of PSGD. 
 
 ### An overview
 PSGD (preconditioned stochastic gradient descent) is a general purpose second-order optimization method. PSGD differentiates itself from most existing methods by its inherent abilities of handling nonconvexity and gradient noises. Please refer to the [original paper](https://arxiv.org/abs/1512.04202) for its designing ideas. Compared with the [old implementation](https://github.com/lixilinx/psgd_torch/releases/tag/1.0), this new Pytorch implementation greatly simplifies the usage of Kronecker product preconditioner, and also use torch.jit.script decorator by default. You may also refer to the updated [TensorFlow 2.x PSGD implementation](https://github.com/lixilinx/psgd_tf).
