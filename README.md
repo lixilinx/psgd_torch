@@ -2,7 +2,7 @@
 ### Scalable black box preconditioners (recent updates)
 [This file](https://drive.google.com/file/d/1CTNx1q67_py87jn-0OI-vSLcsM1K7VsM/view?usp=sharing) documents the math of a few recently developed black box preconditioners. I categorize them into three families, and two are new. 
 
-*Type I: Matrix free preconditioners*. We can construct sparse preconditioners from subgroups of the permutation group. Theoretically, they just reduce to direct sum of smaller groups. But, practically, they can perform well by shortcutting gradients far away in positions.   
+*Type I: Matrix free preconditioners*. We can construct sparse preconditioners from subgroups of the permutation group. Theoretically, they just reduce to the direct sum of smaller groups. But, practically, they can perform well by shortcutting gradients far away in positions.   
 
 Subgroup {e} induces the diagonal/Jacobi preconditioner. PSGD reduces to equilibrated SGD and AdaHessian exactly. It works, but not good enough without the help of momentum ([benchmarked here](https://github.com/lixilinx/psgd_tf/releases/tag/1.3)). 
 
@@ -14,7 +14,7 @@ Standard low rank approximation, e.g., P = diag(d) + U*U', can only fit one end 
 
 *Type III: Preconditioners for affine transform matrices*. Not really black box ones. This is a rich family, including the preconditioner forms in KFAC and batch normalization as special cases, although conceptually different. PSGD is a far more widely applicable and flexible framework. 
 
-The first two families are wrapped as classes for easy use. Three main differences from torch.optim.SGD: 
+The first two families and the classic Newton–Raphson like preconditioner are wrapped as classes for easy use (XMat, UVd and Newton). Three main differences from torch.optim.SGD: 
 1) The loss to be minimized is passed as a closure to the optimizer to support more complicated behaviors, notably, second order derivative approximation via finite-difference formulae when it is not implemented;   
 2) Momentum here is the moving average of gradient so that its setting is decoupled from the learning rate, which is always normalized in PSGD; 
 3) As any other regularizations, (coupled) weight decay should be explicitly realized by adding L2 regularization to the loss in the closure. Decoupled weight decay can be realized by adding decay\*param to the gradient either before preconditioning (scaling invariant penalty 0.5\*decay\*param\*inv(Hessian)\*param) or after preconditioning (penalty 0.5\*decay\*param^2 as in coupled weight decay).    
