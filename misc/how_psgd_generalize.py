@@ -105,10 +105,10 @@ rank = 10  # the order of low rank approximation for Hessian estimation
 ax1 = plt.subplot(121, projection="3d")
 ax2 = plt.subplot(122, projection="3d")
 for mc_trial in range(10):
-    for wd in [0, 1e-4]:
+    for wd_trial, wd in enumerate([0, 1e-4]):
         net = LeNet5()
 
-        if wd == 0:
+        if wd_trial == 0:
             line_color = "k"
             ax = ax1
         else:
@@ -196,6 +196,7 @@ for mc_trial in range(10):
             preconditioner_init_scale=1.0,
             lr_params=0.1,
             lr_preconditioner=0.1,
+            momentum=0.9,   # match the momentum with Adam so that only their 'preconditioners' are different  
             grad_clip_max_norm=10.0,
         )
 
@@ -286,8 +287,8 @@ for mc_trial in range(10):
         ax.tick_params(axis="x", labelsize=7)
         ax.tick_params(axis="y", labelsize=7)
         ax.tick_params(axis="z", labelsize=7)
-        ax.set_xlabel("Cross entropy", fontsize=8)
-        ax.set_ylabel(r"$-\log\det(P)$", fontsize=8)
+        ax.set_xlabel("Train cross entropy", fontsize=8)
+        ax.set_ylabel(r"$\log\det({\rm Hess})$", fontsize=8)
         if ax is ax2:
             ax.set_zlabel("Test error rate", fontsize=8)
         ax.set_title(r"PSGD $\leftarrow$ Adam, weight decay={}".format(wd), fontsize=9)
