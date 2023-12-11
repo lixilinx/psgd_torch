@@ -1,15 +1,33 @@
-"""Created in May, 2018
+"""
+Created in May, 2018
 Pytorch functions for preconditioned SGD
 @author: XILIN LI, lixilinx@gmail.com
 
 Updated in Dec, 2020: 
 Wrapped Kronecker product preconditioner for easy use: the code will select the proper Kronecker product  
 preconditioner based on the formats of input left and right preconditioners.
-Add torch.jit.script decorator by default
+Added torch.jit.script decorator by default.
+
+Updates in 2022:
+Added low-rank approximation (LRA) and XMat preconditioners. 
+Wrapped LRA, XMat and Newton preconditioners as classes for easy use. 
+
+Updates in 2023:
+Added gradient whitening preconditioner. 
+Replaced matrix norm lower bound max(abs(A)) with sqrt(max(max_i sum_j a_ij^2, max_j sum_i a_ij^2)).
+Initialize Q to ((v^T*v)/(h^T*h))^(1/4)*I if the initial scale of Q is set to None.
 """
 
 import torch
 
+
+def norm_lower_bound(A):
+    """
+    returns a cheap lower bound for the spectral norm of A
+    """
+    A = A*A
+    return torch.sqrt(torch.maximum(torch.max(torch.sum(A, 0)), torch.max(torch.sum(A, 1))))
+    
 
 ###############################################################################
 @torch.jit.script
@@ -31,8 +49,9 @@ def update_precond_dense(Q, dxs, dgs, step=0.01, _tiny=1.2e-38):
     b = torch.linalg.solve_triangular(Q.t(), dx, upper=False)
 
     grad = torch.triu(a.mm(a.t()) - b.mm(b.t()))
-    step0 = step/(grad.abs().max() + _tiny)        
-        
+    # step0 = step/(grad.abs().max() + _tiny)
+    step0 = step/(norm_lower_bound(grad) + _tiny)
+              
     return Q - step0*grad.mm(Q)
 
 @torch.jit.script
@@ -160,8 +179,10 @@ def _update_precond_dense_dense(Ql, Qr, dX, dG, step=0.01, _tiny=1.2e-38):
     grad1 = torch.triu(A.mm(A.t()) - Bt.mm(Bt.t()))
     grad2 = torch.triu(A.t().mm(A) - Bt.t().mm(Bt))
     
-    step1 = step/(torch.max(torch.abs(grad1)) + _tiny)
-    step2 = step/(torch.max(torch.abs(grad2)) + _tiny)
+    # step1 = step/(torch.max(torch.abs(grad1)) + _tiny)
+    # step2 = step/(torch.max(torch.abs(grad2)) + _tiny)
+    step1 = step/(norm_lower_bound(grad1) + _tiny)
+    step2 = step/(norm_lower_bound(grad2) + _tiny)
         
     return Ql - step1*grad1.mm(Ql), Qr - step2*grad2.mm(Qr)
     
@@ -221,7 +242,8 @@ def _update_precond_norm_dense(ql, Qr, dX, dG, step=0.01, _tiny=1.2e-38):
     new_ql1 = ql[1] - step1*(grad1_diag*ql[1] + ql[0,-1]*grad1_bias)
     
     grad2 = torch.triu(A.t().mm(A) - Bt.t().mm(Bt))
-    step2 = step/(torch.max(torch.abs(grad2)) + _tiny)
+    # step2 = step/(torch.max(torch.abs(grad2)) + _tiny)
+    step2 = step/(norm_lower_bound(grad2) + _tiny)
     
     return torch.stack((new_ql0, new_ql1)), Qr - step2*grad2.mm(Qr)
 
@@ -345,7 +367,8 @@ def _update_precond_dense_scale(Ql, qr, dX, dG, step=0.01, _tiny=1.2e-38):
     grad1 = torch.triu(A.mm(A.t()) - Bt.mm(Bt.t()))
     grad2 = torch.sum(A*A, dim=0, keepdim=True) - torch.sum(Bt*Bt, dim=0, keepdim=True)
     
-    step1 = step/(torch.max(torch.abs(grad1)) + _tiny)
+    # step1 = step/(torch.max(torch.abs(grad1)) + _tiny)
+    step1 = step/(norm_lower_bound(grad1) + _tiny)
     step2 = step/(torch.max(torch.abs(grad2)) + _tiny)
         
     return Ql - step1*grad1.mm(Ql), qr - step2*grad2*qr
@@ -435,10 +458,11 @@ def update_precond_splu(L12, l3, U12, u3, dxs, dgs, step=0.01, _tiny=1.2e-38):
     grad1 = torch.tril(grad1)
     grad2 = Qg2.mm(Qg1.t()) - iQtx2.mm(iQtx1.t())
     grad3 = Qg2*Qg2 - iQtx2*iQtx2
-    max_abs_grad = torch.max(torch.abs(grad1))
-    max_abs_grad = torch.max(max_abs_grad, torch.max(torch.abs(grad2)))
-    max_abs_grad = torch.max(max_abs_grad, torch.max(torch.abs(grad3)))
-    step0 = step/(max_abs_grad + _tiny)
+    # max_abs_grad = torch.max(torch.abs(grad1))
+    # max_abs_grad = torch.max(max_abs_grad, torch.max(torch.abs(grad2)))
+    # max_abs_grad = torch.max(max_abs_grad, torch.max(torch.abs(grad3)))
+    # step0 = step/(max_abs_grad + _tiny)
+    step0 = step/(torch.maximum(norm_lower_bound(torch.cat([grad1, grad2], 0)), torch.max(torch.abs(grad3))) + _tiny)
     newL1 = L1 - step0*grad1.mm(L1)
     newL2 = L2 - step0*grad2.mm(L1) - step0*grad3*L2
     newl3 = l3 - step0*grad3*l3
@@ -448,10 +472,11 @@ def update_precond_splu(L12, l3, U12, u3, dxs, dgs, step=0.01, _tiny=1.2e-38):
     grad1 = torch.triu(grad1)
     grad2 = Pg1.mm(dg[r:].t()) - dx[:r].mm(iPx2.t())
     grad3 = Pg2*dg[r:] - dx[r:]*iPx2
-    max_abs_grad = torch.max(torch.abs(grad1))
-    max_abs_grad = torch.max(max_abs_grad, torch.max(torch.abs(grad2)))
-    max_abs_grad = torch.max(max_abs_grad, torch.max(torch.abs(grad3)))
-    step0 = step/(max_abs_grad + _tiny)
+    # max_abs_grad = torch.max(torch.abs(grad1))
+    # max_abs_grad = torch.max(max_abs_grad, torch.max(torch.abs(grad2)))
+    # max_abs_grad = torch.max(max_abs_grad, torch.max(torch.abs(grad3)))
+    # step0 = step/(max_abs_grad + _tiny)
+    step0 = step/(torch.maximum(norm_lower_bound(torch.cat([grad1, grad2], 1)), torch.max(torch.abs(grad3))) + _tiny)
     newU1 = U1 - U1.mm(step0*grad1)
     newU2 = U2 - U1.mm(step0*grad2) - step0*grad3.t()*U2
     newu3 = u3 - step0*grad3*u3
@@ -507,7 +532,7 @@ def precond_grad_splu(L12, l3, U12, u3, grads):
 
 ##############################################################################
 #
-# The low-rank approximation (UVd) preconditioner is defined by
+# The low-rank approximation (LRA) preconditioner is defined as
 #
 #   Q = (I + U*V')*diag(d)
 #
@@ -515,9 +540,7 @@ def precond_grad_splu(L12, l3, U12, u3, grads):
 #
 #   diag(d) + U*V'
 # 
-# It relates to the LM-BFGS and conjugate gradient methods. 
-#
-# The JIT decorator can be enabled if helps. 
+# UVd as an alias of LRA due to the form of this preconditioner. 
 # 
 
 #@torch.jit.script
@@ -628,24 +651,25 @@ def precond_grad_UVd_math(U, V, d, g):
     return g
 
 
-class UVd:
+class LRA:
     """
-    Implements the low-rank approximation (UVd) preconditioner, Q = (I + U*V')*diag(d), as a class.
+    Implements the low-rank approximation (LRA, UVd as an alias) preconditioner, Q = (I + U*V')*diag(d), as a class.
 
     Args for initialization:
         params_with_grad: a list of parameters or variables requiring gradients;
-        rank_of_approximation: rank of approximation, i.e., rank of U or V;
-        preconditioner_init_scale: initial scale of Q, or roughly, Q = preconditioner_init_scale*eye();
+        rank_of_approximation: rank of approximation, i.e., max rank of U or V, with 0 for diagonal preconditioner;
+        preconditioner_init_scale: initial scale of Q, or roughly, Q = preconditioner_init_scale*eye(), with None for automatical setting;
         lr_params: normalized learning rate for parameters in range [0, 1];
         lr_preconditioner: normalized learning rate for preconditioner in range [0, 1];
         momentum: momentum factor in range [0,1);
         grad_clip_max_norm: maximum allowable gradient norm after clipping, None for no clipping;
-        preconditioner_update_probability: probability on updating Q, 1 for updating at every step, and 0 for never;
+        preconditioner_update_probability: probability on updating Q, 1 for updating at every step, and 0 for never, i.e., SGD when Q=I;
         exact_hessian_vector_product: True for exact Hessian-vector product via 2nd derivative,
-                                    and False for approximate one via finite-difference formulae.
+                                    and False for approximate one via the finite difference method;
+        preconditioner_type: "Newton" or "whitening", see https://arxiv.org/abs/1809.10232 for the Newton and (empirical) Fisher types.  
 
     Notes:
-        Note 1: The Hessian-vector product can be approximated using the finite-difference formulae by setting 
+        Note 1: The Hessian-vector product can be approximated using the finite difference method by setting 
         exact_hessian_vector_product = False when the 2nd derivatives is not available.
         In this case, make sure that the closure produces the same outputs given the same inputs, 
         except for numerical errors due to non-deterministic behaviors.
@@ -656,11 +680,12 @@ class UVd:
         This is necessary as the learning rate in PSGD is normalized. 
 
         Note 3: `torch.linalg.solve' is called twice in function `update_precond_UVd_math_'.
-        Certain solver could be orders of magnitude faster than others, especially for small matrices (see the pdf file).
+        Certain solver could be orders of magnitude faster than others, especially for small matrices 
+        (see https://drive.google.com/file/d/1CTNx1q67_py87jn-0OI-vSLcsM1K7VsM/view, Table 2).
         Considering replace it with faster ones if the default solver is too slow.
 
         Note 4: Currently, no support of sparse and mixed-precision gradients. 
-        Half precision is supported except that torch.linalg.solve (v1.12) requires casting float16 to float32.    
+        Half precision (bfloat16) works well except that torch.linalg.solve (v2.2) requires casting bfloat16 to float32.    
         
         Note 5: lr_params, lr_preconditioner, momentum, grad_clip_max_norm, preconditioner_update_probability, and 
         exact_hessian_vector_product (bool) all can be reset on the fly. 
@@ -668,7 +693,7 @@ class UVd:
     def __init__(self,  params_with_grad, rank_of_approximation:int=10, preconditioner_init_scale=1.0,
                         lr_params=0.01, lr_preconditioner=0.01, momentum=0.0,
                         grad_clip_max_norm=None, preconditioner_update_probability=1.0,
-                        exact_hessian_vector_product:bool=True):
+                        exact_hessian_vector_product:bool=True, preconditioner_type="Newton"):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner
@@ -685,25 +710,35 @@ class UVd:
         self._param_sizes = [torch.numel(param) for param in self._params_with_grad]
         self._param_cumsizes = torch.cumsum(torch.tensor(self._param_sizes), 0)
         num_params = self._param_cumsizes[-1]
-        self._U = torch.randn(num_params, rank_of_approximation, dtype=dtype, device=device) / (num_params*rank_of_approximation)**0.5
-        self._V = torch.randn(num_params, rank_of_approximation, dtype=dtype, device=device) / (num_params*rank_of_approximation)**0.5
-        self._d = torch.ones( num_params, 1, dtype=dtype, device=device) * preconditioner_init_scale
+        # check rank_of_approximation
+        if rank_of_approximation <= 0:
+            print("Hint: the Xmat preconditioner may be more efficinet in this case.")
+        if 2*rank_of_approximation + 1 >= num_params:
+            print("Hint: the Newton preconditioner may be more efficient in this case.")
+        # +10 to 1) avoid /0; 2) make sure that norm(U*V') << 1 even when rank_of_approximation=1
+        self._U = torch.randn(num_params, rank_of_approximation, dtype=dtype, device=device) / (num_params*(rank_of_approximation+10))**0.5
+        self._V = torch.randn(num_params, rank_of_approximation, dtype=dtype, device=device) / (num_params*(rank_of_approximation+10))**0.5
+        if preconditioner_init_scale is None:
+            self._d = None # set it on the fly 
+        else:
+            self._d = torch.ones(num_params, 1, dtype=dtype, device=device) * preconditioner_init_scale
         self._m = None # momentum buffer 
+        self._preconditioner_type = preconditioner_type
 
 
     @torch.no_grad()
     def step(self, closure):
         """
-        Performs a single step of PSGD with low-rank approximation (UVd) preconditioner, i.e., 
+        Performs a single step of PSGD with the low-rank approximation (LRA, or UVd) preconditioner, i.e., 
         updating the trainable parameters once, and returning what closure returns.
 
         Args:
-            closure (callable): a closure that evaluates the function of self._params_with_grad,
+            closure (callable): a (stateless) closure that evaluates the function of self._params_with_grad,
                                 and returns the loss, or an iterable with the first one being loss.
                                 Random numbers, if any, used inside the closure should be generated starting 
-                                from the same rng state if self.exact_hessian_vector_product = False; otherwise doesn't matter. 
+                                from the same rng state if exact_hessian_vector_product=False and preconditioner_type="Newton". 
         """
-        if torch.rand([]) < self.preconditioner_update_probability:
+        if (self._preconditioner_type=="Newton") and ((torch.rand([]) < self.preconditioner_update_probability) or (self._d is None)):
             # evaluates gradients, Hessian-vector product, and updates the preconditioner
             if self.exact_hessian_vector_product:
                 # exact Hessian-vector product
@@ -727,14 +762,19 @@ class UVd:
                     perturbed_grads = torch.autograd.grad(perturbed_loss, self._params_with_grad)
                 Hvs = [perturbed_g - g for (perturbed_g, g) in zip(perturbed_grads, grads)]
             # update preconditioner
-            v = torch.cat([torch.flatten(v) for v in vs])
-            h = torch.cat([torch.flatten(h) for h in Hvs])
-            if self.exact_hessian_vector_product:
-                update_precond_UVd_math_(self._U, self._V, self._d,
-                                         v[:,None], h[:,None], step=self.lr_preconditioner, tiny=self._tiny)
-            else: # compensate the levels of v and h; helpful to reduce numerical errors in half-precision training
-                update_precond_UVd_math_(self._U, self._V, self._d,
-                                         v[:,None]/self._delta_param_scale, h[:,None]/self._delta_param_scale, step=self.lr_preconditioner, tiny=self._tiny)
+            v = torch.cat([torch.reshape(v, [-1, 1]) for v in vs]) # column vector
+            h = torch.cat([torch.reshape(h, [-1, 1]) for h in Hvs]) # column vector  
+            # set self._d if it is None 
+            if self._d is None:
+                self._d = (torch.sum(v*v)/torch.sum(h*h))**0.25 * torch.ones_like(v)
+            # update self._U, _V and _d
+            update_precond_UVd_math_(self._U, self._V, self._d, v, h, step=self.lr_preconditioner, tiny=self._tiny)
+            # if self.exact_hessian_vector_product:
+            #     update_precond_UVd_math_(self._U, self._V, self._d,
+            #                              v[:,None], h[:,None], step=self.lr_preconditioner, tiny=self._tiny)
+            # else: # compensate the levels of v and h; helpful to reduce numerical errors in half-precision training
+            #     update_precond_UVd_math_(self._U, self._V, self._d,
+            #                              v[:,None]/self._delta_param_scale, h[:,None]/self._delta_param_scale, step=self.lr_preconditioner, tiny=self._tiny)
         else:
             # only evaluates the gradients
             with torch.enable_grad():
@@ -742,18 +782,28 @@ class UVd:
                 loss = closure_returns if isinstance(closure_returns, torch.Tensor) else closure_returns[0]
                 grads = torch.autograd.grad(loss, self._params_with_grad)
             vs = None # no vs and Hvs
+            
+        # cat grads
+        grad = torch.cat([torch.reshape(g, [-1, 1]) for g in grads]) # column vector 
+        
+        # update preconditioner here if it is the whitening type 
+        if (self._preconditioner_type!="Newton") and ((torch.rand([]) < self.preconditioner_update_probability) or (self._d is None)):
+            if self._d is None:
+                self._d = (len(grad)/torch.sum(grad*grad))**0.25 * torch.ones_like(grad)
+            # update the preconditioner whitening the gradients  
+            v = torch.randn_like(grad)
+            update_precond_UVd_math_(self._U, self._V, self._d, v, grad, step=self.lr_preconditioner, tiny=self._tiny)
 
-        # preconditioned gradients; momentum is optional
-        grad = torch.cat([torch.flatten(g) for g in grads])
+        # preconditioned gradients; momentum is optional      
         if self.momentum > 0:
             if self._m is None:
                 self._m = (1 - self.momentum)*grad
             else:
-                self._m.mul_(self.momentum).add_((1 - self.momentum)*grad)
-            pre_grad = precond_grad_UVd_math(self._U, self._V, self._d, self._m[:, None])
+                self._m.mul_(self.momentum).add_(grad, alpha=1 - self.momentum)
+            pre_grad = precond_grad_UVd_math(self._U, self._V, self._d, self._m)
         else:
             self._m = None # clean the buffer when momentum is set to zero 
-            pre_grad = precond_grad_UVd_math(self._U, self._V, self._d, grad[:, None])
+            pre_grad = precond_grad_UVd_math(self._U, self._V, self._d, grad)
             
         # gradient clipping is optional
         if self.grad_clip_max_norm is None:
@@ -763,25 +813,30 @@ class UVd:
             lr = self.lr_params * min(self.grad_clip_max_norm/grad_norm, 1.0)
             
         # update the parameters
-        if self.exact_hessian_vector_product or (vs is None):
-            [param.subtract_(lr * pre_grad[j - i:j].view_as(param))
-             for (param, i, j) in zip(self._params_with_grad, self._param_sizes, self._param_cumsizes)]
+        if self.exact_hessian_vector_product or (vs is None) or (self._preconditioner_type!="Newton"):
+            delta = lr * pre_grad
         else: # in this case, do not forget to remove the perturbation on parameters
-            [param.subtract_(lr * pre_grad[j - i:j].view_as(param) + v)
-             for (param, i, j, v) in zip(self._params_with_grad, self._param_sizes, self._param_cumsizes, vs)]
+            delta = lr * pre_grad + v
+        # -delta 
+        [param.subtract_(delta[j - i:j].view_as(param))
+         for (param, i, j) in zip(self._params_with_grad, self._param_sizes, self._param_cumsizes)]
+        
         # return whatever closure returns
         return closure_returns
 
-################## end of UVd preconditioner #################################
+# UVd as an alias
+UVd = LRA
+
+################## end of LRA/UVd preconditioner #################################
 
 
 ##############################################################################
-# An Xmat (X-matrix) preconditioner is defined by
+# An Xmat (X-matrix) preconditioner is defined as
 #
 #   Q = diag(a) + adiag(b)
 #
 # where adiag means anti-diagonal.
-# It's slightly more complicated than a diagonal preconditioner, but performs better.
+# It's slightly more complicated than a diagonal preconditioner (LRA with rank=0), but may perform better.
 #
 
 #@torch.jit.script
@@ -819,20 +874,22 @@ class XMat:
     Implements the Xmat preconditioner, Q = diag(a) + adiag(b), as a class.
     Args for initialization:
         params_with_grad: a list of parameters or variables requiring gradients;
-        preconditioner_init_scale: initial scale of Q, i.e., Q = preconditioner_init_scale*eye();
+        preconditioner_init_scale: initial scale of Q, i.e., Q = preconditioner_init_scale*eye(), with None for automatical setting;
         lr_params: normalized learning rate for parameters in range [0, 1];
         lr_preconditioner: normalized learning rate for preconditioner in range [0, 1];
         momentum: momentum factor in range [0,1);
         grad_clip_max_norm: maximum allowable gradient norm after clipping, None for no clipping;
-        preconditioner_update_probability: probability on updating Q, 1 for updating at every step, and 0 for never, i.e., SGD;
+        preconditioner_update_probability: probability on updating Q, 1 for updating at every step, and 0 for never, i.e., SGD when Q=I;
         exact_hessian_vector_product: True for exact Hessian-vector product via 2nd derivative,
-                                    and False for approximate one via finite-difference formulae.
+                                    and False for approximate one via the finite difference method;
+        preconditioner_type: "Newton" or "whitening", see https://arxiv.org/abs/1809.10232 for the Newton and (empirical) Fisher types.
+                                    
     Notes:
-        Note 1: The Hessian-vector product can be approximated using the finite-difference formulae by setting
+        Note 1: The Hessian-vector product can be approximated using the finite difference method by setting
         exact_hessian_vector_product = False when the 2nd derivatives is not available.
         In this case, make sure that the closure produces the same outputs given the same inputs,
         except for numerical errors due to non-deterministic behaviors.
-        Random numbers, if any, used inside the closure should be generated starting from the same state, where the rng state can be
+        Random numbers, if any, used inside the closure should be generated starting from the same states, where the rng state can be
         read and set by, e.g., `torch.cuda.get_rng_state' and `torch.cuda.set_rng_state', respectively.
         
         Note 2: Momentum here is the moving average of gradient so that its setting is decoupled from the learning rate.
@@ -846,7 +903,7 @@ class XMat:
     def __init__(self, params_with_grad, preconditioner_init_scale=1.0,
                  lr_params=0.01, lr_preconditioner=0.01, momentum=0.0, 
                  grad_clip_max_norm=None, preconditioner_update_probability=1.0,
-                 exact_hessian_vector_product: bool = True):
+                 exact_hessian_vector_product: bool = True, preconditioner_type="Newton"):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner
@@ -863,9 +920,13 @@ class XMat:
         self._param_sizes = [torch.numel(param) for param in self._params_with_grad]
         self._param_cumsizes = torch.cumsum(torch.tensor(self._param_sizes), 0)
         num_params = self._param_cumsizes[-1]
-        self._a = torch.ones(num_params, dtype=dtype, device=device)*preconditioner_init_scale
+        if preconditioner_init_scale is None:
+            self._a = None # set it on the fly 
+        else:
+            self._a = torch.ones(num_params, dtype=dtype, device=device)*preconditioner_init_scale
         self._b = torch.zeros(num_params, dtype=dtype, device=device)
         self._m = None # buffer for momentum 
+        self._preconditioner_type = preconditioner_type
 
     @torch.no_grad()
     def step(self, closure):
@@ -873,12 +934,12 @@ class XMat:
         Performs a single step of PSGD with Xmat preconditioner, i.e.,
         updating the trainable parameters once, and returning what closure returns.
         Args:
-            closure (callable): a closure that evaluates the function of self._params_with_grad,
+            closure (callable): a (stateless) closure that evaluates the function of self._params_with_grad,
                                 and returns the loss, or an iterable with the first one being loss.
                                 Random numbers, if any, used inside the closure should be generated starting
-                                from the same rng state if self.exact_hessian_vector_product = False; otherwise doesn't matter.
+                                from the same rng state if exact_hessian_vector_product=False and preconditioner_type="Newton".
         """
-        if torch.rand([]) < self.preconditioner_update_probability:
+        if (self._preconditioner_type=="Newton") and ((torch.rand([]) < self.preconditioner_update_probability) or (self._a is None)):
             # evaluates gradients, Hessian-vector product, and updates the preconditioner
             if self.exact_hessian_vector_product:
                 # exact Hessian-vector product
@@ -904,13 +965,18 @@ class XMat:
             # update preconditioner
             v = torch.cat([torch.flatten(v) for v in vs])
             h = torch.cat([torch.flatten(h) for h in Hvs])
-            if self.exact_hessian_vector_product:
-                update_precond_Xmat_math_(self._a, self._b,
-                                         v, h, step=self.lr_preconditioner, tiny=self._tiny)
-            else:  # compensate the levels of v and h; helpful to reduce numerical errors in half-precision training
-                update_precond_Xmat_math_(self._a, self._b,
-                                         v/self._delta_param_scale, h/self._delta_param_scale,
-                                         step=self.lr_preconditioner, tiny=self._tiny)
+            # initialize self._a if it is None
+            if self._a is None: 
+                self._a = (torch.sum(v*v)/torch.sum(h*h))**0.25 * torch.ones_like(v)
+            # update self._a and self._b
+            update_precond_Xmat_math_(self._a, self._b, v, h, step=self.lr_preconditioner, tiny=self._tiny)
+            # if self.exact_hessian_vector_product:
+            #     update_precond_Xmat_math_(self._a, self._b,
+            #                              v, h, step=self.lr_preconditioner, tiny=self._tiny)
+            # else:  # compensate the levels of v and h; helpful to reduce numerical errors in half-precision training
+            #     update_precond_Xmat_math_(self._a, self._b,
+            #                              v/self._delta_param_scale, h/self._delta_param_scale,
+            #                              step=self.lr_preconditioner, tiny=self._tiny)
         else:
             # only evaluates the gradients
             with torch.enable_grad():
@@ -919,13 +985,23 @@ class XMat:
                 grads = torch.autograd.grad(loss, self._params_with_grad)
             vs = None  # no vs and Hvs
 
-        # preconditioned gradients; momentum is optional        
+        # cat grads
         grad = torch.cat([torch.flatten(g) for g in grads])
+
+        # update preconditioner here if it is the whitening type 
+        if (self._preconditioner_type!="Newton") and ((torch.rand([]) < self.preconditioner_update_probability) or (self._a is None)):
+            if self._a is None:
+                self._a = (len(grad)/torch.sum(grad*grad))**0.25 * torch.ones_like(grad)
+            # this preconditioner whitens the gradient 
+            v = torch.randn_like(grad)
+            update_precond_Xmat_math_(self._a, self._b, v, grad, step=self.lr_preconditioner, tiny=self._tiny)
+                
+        # preconditioned gradients; momentum is optional           
         if self.momentum > 0:
             if self._m is None:
                 self._m = (1 - self.momentum)*grad
             else:
-                self._m.mul_(self.momentum).add_((1 - self.momentum)*grad)
+                self._m.mul_(self.momentum).add_(grad, alpha=1 - self.momentum)
             pre_grad = precond_grad_Xmat_math(self._a, self._b, self._m)
         else:
             self._m = None # clean the buffer when momentum is set to zero again 
@@ -939,12 +1015,14 @@ class XMat:
             lr = self.lr_params * min(self.grad_clip_max_norm / grad_norm, 1.0)
 
         # update the parameters
-        if self.exact_hessian_vector_product or (vs is None):
-            [param.subtract_(lr * pre_grad[j - i:j].view_as(param))
-             for (param, i, j) in zip(self._params_with_grad, self._param_sizes, self._param_cumsizes)]
+        if self.exact_hessian_vector_product or (vs is None) or (self._preconditioner_type!="Newton"):
+            delta = lr * pre_grad
         else:  # in this case, do not forget to remove the perturbation on parameters
-            [param.subtract_(lr * pre_grad[j - i:j].view_as(param) + v)
-             for (param, i, j, v) in zip(self._params_with_grad, self._param_sizes, self._param_cumsizes, vs)]
+            delta = lr * pre_grad + v
+        # -delta 
+        [param.subtract_(delta[j - i:j].view_as(param))
+         for (param, i, j) in zip(self._params_with_grad, self._param_sizes, self._param_cumsizes)]
+
         # return whatever closure returns
         return closure_returns
 
@@ -952,7 +1030,7 @@ class XMat:
 
 
 ###############################################################################
-# The classic Newton–Raphson type preconditioner.
+# The classic Newton-Raphson type preconditioner, but also applicable to indefinite Hessian.
 # Clearly, it is applicable only to small scale problems 
 #
 
@@ -960,45 +1038,52 @@ class XMat:
 def update_precond_newton_math_(Q, v, h, step, tiny):
     # type: (Tensor, Tensor, Tensor, float, float) -> None
     """
-    Update the classic Newton–Raphson type preconditioner P = Q'*Q with (v, h).
+    Update the classic Newton-Raphson type preconditioner P = Q'*Q with (v, h).
+    Basically a copy of function 
+        update_precond_dense(Q, dxs, dgs, step=0.01, _tiny=1.2e-38)
     """
     a = Q.mm(h)
     b = torch.linalg.solve_triangular(Q.t(), v, upper=False)
     grad = torch.triu(a.mm(a.t()) - b.mm(b.t()))
-    mu = step/(grad.abs().max() + tiny)      
-    Q.sub_(mu*grad.mm(Q))
+    # mu = step/(grad.abs().max() + tiny)
+    mu = step/(norm_lower_bound(grad) + tiny)      
+    Q.sub_(mu*grad.mm(Q))  # use triangular matrix-matrix multiplicationtorch (TRMM) if possible   
 
 class Newton:
     """
-    Implements the classic Newton–Raphson type preconditioner for SGD as a class.
+    Implements the classic Newton-Raphson type preconditioner for SGD as a class.
     Args for initialization:
         params_with_grad: a list of parameters or variables requiring gradients;
-        preconditioner_init_scale: initial scale of Q, i.e., Q = preconditioner_init_scale*eye();
+        preconditioner_init_scale: initial scale of Q, i.e., Q = preconditioner_init_scale*eye(), with None for automatical setting;
         lr_params: normalized learning rate for parameters in range [0, 1];
         lr_preconditioner: normalized learning rate for preconditioner in range [0, 1];
         momentum: momentum factor in range [0,1);
         grad_clip_max_norm: maximum allowable gradient norm after clipping, None for no clipping;
-        preconditioner_update_probability: probability on updating Q, 1 for updating at every step, and 0 for never, i.e., SGD;
+        preconditioner_update_probability: probability on updating Q, 1 for updating at every step, and 0 for never, i.e., SGD when Q=I;
         exact_hessian_vector_product: True for exact Hessian-vector product via 2nd derivative,
-                                    and False for approximate one via finite-difference formulae.
+                                    and False for approximate one via the finite difference method;
+        preconditioner_type: "Newton" or "whitening", see https://arxiv.org/abs/1809.10232 for the Newton and (empirical) Fisher types.
+                                    
     Notes:
-        Note 1: The Hessian-vector product can be approximated using the finite-difference formulae by setting
+        Note 1: The Hessian-vector product can be approximated using the finite difference method by setting
         exact_hessian_vector_product = False when the 2nd derivatives is not available.
         In this case, make sure that the closure produces the same outputs given the same inputs,
         except for numerical errors due to non-deterministic behaviors.
-        Random numbers, if any, used inside the closure should be generated starting from the same state, where the rng state can be
+        Random numbers, if any, used inside the closure should be generated starting from the same states, where the rng state can be
         read and set by, e.g., `torch.cuda.get_rng_state' and `torch.cuda.set_rng_state', respectively.
         
         Note 2: Momentum here is the moving average of gradient so that its setting is decoupled from the learning rate.
         This is necessary as the learning rate in PSGD is normalized.
+        
         Note 3: Currently, no support of sparse and mixed-precision gradients.
+        
         Note 4: lr_params, lr_preconditioner, momentum, grad_clip_max_norm, preconditioner_update_probability, and
         exact_hessian_vector_product (bool) all can be reset on the fly.
     """
     def __init__(self, params_with_grad, preconditioner_init_scale=1.0,
                  lr_params=0.01, lr_preconditioner=0.01, momentum=0.0, 
                  grad_clip_max_norm=None, preconditioner_update_probability=1.0,
-                 exact_hessian_vector_product: bool = True):
+                 exact_hessian_vector_product: bool = True, preconditioner_type="Newton"):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner
@@ -1015,21 +1100,25 @@ class Newton:
         self._param_sizes = [torch.numel(param) for param in self._params_with_grad]
         self._param_cumsizes = torch.cumsum(torch.tensor(self._param_sizes), 0)
         num_params = self._param_cumsizes[-1]
-        self._Q = torch.eye(num_params, dtype=dtype, device=device)*preconditioner_init_scale
+        if preconditioner_init_scale is None:
+            self._Q = None # initialize Q on the fly
+        else:
+            self._Q = torch.eye(num_params, dtype=dtype, device=device)*preconditioner_init_scale
         self._m = None # buffer for momentum 
+        self._preconditioner_type = preconditioner_type
 
     @torch.no_grad()
     def step(self, closure):
         """
-        Performs a single step of PSGD with Newton–Raphson preconditioner, i.e.,
+        Performs a single step of PSGD with Newton-Raphson type preconditioner, i.e.,
         updating the trainable parameters once, and returning what closure returns.
         Args:
-            closure (callable): a closure that evaluates the function of self._params_with_grad,
+            closure (callable): a (stateless) closure that evaluates the function of self._params_with_grad,
                                 and returns the loss, or an iterable with the first one being loss.
                                 Random numbers, if any, used inside the closure should be generated starting
-                                from the same rng state if self.exact_hessian_vector_product = False; otherwise doesn't matter.
+                                from the same rng state if exact_hessian_vector_product=False and preconditioner_type="Newton".
         """
-        if torch.rand([]) < self.preconditioner_update_probability:
+        if (self._preconditioner_type=="Newton") and ((torch.rand([]) < self.preconditioner_update_probability) or (self._Q is None)):
             # evaluates gradients, Hessian-vector product, and updates the preconditioner
             if self.exact_hessian_vector_product:
                 # exact Hessian-vector product
@@ -1053,15 +1142,20 @@ class Newton:
                     perturbed_grads = torch.autograd.grad(perturbed_loss, self._params_with_grad)
                 Hvs = [perturbed_g - g for (perturbed_g, g) in zip(perturbed_grads, grads)]
             # update preconditioner
-            v = torch.cat([torch.flatten(v) for v in vs])
-            h = torch.cat([torch.flatten(h) for h in Hvs])
-            if self.exact_hessian_vector_product:
-                update_precond_newton_math_(self._Q,
-                                            v[:,None], h[:,None], step=self.lr_preconditioner, tiny=self._tiny)
-            else:  # compensate the levels of v and h; helpful to reduce numerical errors in half-precision training
-                update_precond_newton_math_(self._Q,
-                                            v[:,None]/self._delta_param_scale, h[:,None]/self._delta_param_scale,
-                                            step=self.lr_preconditioner, tiny=self._tiny)
+            v = torch.cat([torch.reshape(v, [-1, 1]) for v in vs]) 
+            h = torch.cat([torch.reshape(h, [-1, 1]) for h in Hvs]) 
+            # initialize Q if it is None
+            if self._Q is None:
+                self._Q = (torch.sum(v*v)/torch.sum(h*h))**0.25 * torch.eye(len(v), dtype=v.dtype, device=v.device)
+            # then update Q 
+            update_precond_newton_math_(self._Q, v, h, step=self.lr_preconditioner, tiny=self._tiny)
+            # if self.exact_hessian_vector_product:
+            #     update_precond_newton_math_(self._Q,
+            #                                 v[:,None], h[:,None], step=self.lr_preconditioner, tiny=self._tiny)
+            # else:  # compensate the levels of v and h; helpful to reduce numerical errors in half-precision training
+            #     update_precond_newton_math_(self._Q,
+            #                                 v[:,None]/self._delta_param_scale, h[:,None]/self._delta_param_scale,
+            #                                 step=self.lr_preconditioner, tiny=self._tiny)
         else:
             # only evaluates the gradients
             with torch.enable_grad():
@@ -1069,14 +1163,24 @@ class Newton:
                 loss = closure_returns if isinstance(closure_returns, torch.Tensor) else closure_returns[0]
                 grads = torch.autograd.grad(loss, self._params_with_grad)
             vs = None  # no vs and Hvs
+            
+        # cat grads
+        grad = torch.cat([torch.reshape(g, [-1, 1]) for g in grads]) 
+        
+        # update preconditioner here if it is the whitening type 
+        if (self._preconditioner_type!="Newton") and ((torch.rand([]) < self.preconditioner_update_probability) or (self._Q is None)):
+            if self._Q is None:
+                self._Q = (len(grad)/torch.sum(grad*grad))**0.25 * torch.eye(len(grad), dtype=grad.dtype, device=grad.device)
+            # this preconditioner whitens the gradient 
+            v = torch.randn_like(grad)
+            update_precond_newton_math_(self._Q, v, grad, step=self.lr_preconditioner, tiny=self._tiny)
 
-        # preconditioned gradients; momentum is optional        
-        grad = torch.cat([torch.flatten(g) for g in grads])
+        # preconditioned gradients; momentum is optional             
         if self.momentum > 0:
             if self._m is None:
                 self._m = (1 - self.momentum)*grad
             else:
-                self._m.mul_(self.momentum).add_((1 - self.momentum)*grad)
+                self._m.mul_(self.momentum).add_(grad, alpha=1 - self.momentum)
             pre_grad = self._Q.t() @ (self._Q @ self._m)
         else:
             self._m = None # clean the buffer when momentum is set to zero again 
@@ -1090,13 +1194,15 @@ class Newton:
             lr = self.lr_params * min(self.grad_clip_max_norm / grad_norm, 1.0)
 
         # update the parameters
-        if self.exact_hessian_vector_product or (vs is None):
-            [param.subtract_(lr * pre_grad[j - i:j].view_as(param))
-             for (param, i, j) in zip(self._params_with_grad, self._param_sizes, self._param_cumsizes)]
+        if self.exact_hessian_vector_product or (vs is None) or (self._preconditioner_type!="Newton"):
+            delta = lr * pre_grad 
         else:  # in this case, do not forget to remove the perturbation on parameters
-            [param.subtract_(lr * pre_grad[j - i:j].view_as(param) + v)
-             for (param, i, j, v) in zip(self._params_with_grad, self._param_sizes, self._param_cumsizes, vs)]
+            delta = lr * pre_grad + v
+        # -delta 
+        [param.subtract_(delta[j - i:j].view_as(param))
+         for (param, i, j) in zip(self._params_with_grad, self._param_sizes, self._param_cumsizes)]
+        
         # return whatever closure returns
         return closure_returns
 
-################## end of Newton–Raphson preconditioner #################################
+################## end of Newton-Raphson preconditioner #################################
