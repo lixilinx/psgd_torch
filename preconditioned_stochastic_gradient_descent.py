@@ -1206,3 +1206,261 @@ class Newton:
         return closure_returns
 
 ################## end of Newton-Raphson preconditioner #################################
+
+##############################################################################
+#
+# This specific affine group preconditioner is defined as
+#
+#   Q = sum_i kron(conj(Q2i), Qi1)
+#
+# where Q1i and Q2i are triangular or diagonal matrices with positive diagonals (https://arxiv.org/pdf/1809.10232.pdf).  
+# 
+
+def initQ(size, dtype, device, max_size):
+    """
+    Initialize Q as an identity matrix if its size <= max_size;
+    otherwise a vector of ones. 
+    """
+    if size <= max_size:
+        return torch.eye(size, dtype=dtype, device=device)
+    else:
+        return torch.ones(size, dtype=dtype, device=device) 
+
+#@torch.jit.script
+def update_precond_affine_math_(Ql, Qr, dX, dG, step, tiny):
+    # type: (Tensor, Tensor, Tensor, Tensor, float, float) -> Tuple[Tensor, Tensor]
+    """
+    Basically a copy of function 
+        _update_precond_dense_dense(Ql, Qr, dX, dG, step=0.01, _tiny=1.2e-38)
+    but with in-place preconditioner update and support of complex matrices and diagonal matrices.  
+    """
+    if torch.rand([]) < 0.01:
+        max_l = torch.max(torch.abs(Ql)) 
+        max_r = torch.max(torch.abs(Qr)) 
+        
+        rho = torch.sqrt(max_l/max_r)
+        Ql.div_(rho)
+        Qr.mul_(rho)
+        
+    
+    if Ql.dim()==2:
+        if Qr.dim()==2: # Ql.dim()=2 and Qr.dim()=2:
+            A = torch.linalg.multi_dot([Ql, dG, Qr.H])
+            Bh = torch.linalg.solve_triangular(Ql.H, torch.linalg.solve_triangular(Qr, dX, upper=True, left=False), upper=False) # Bh is B^H 
+            
+            grad1 = torch.triu(A.mm(A.H) - Bh.mm(Bh.H))
+            grad2 = torch.triu(A.H.mm(A) - Bh.H.mm(Bh))
+        
+            step1 = step/(norm_lower_bound(torch.abs(grad1)) + tiny)
+            step2 = step/(norm_lower_bound(torch.abs(grad2)) + tiny)
+            Ql.sub_(step1*grad1.mm(Ql)) 
+            Qr.sub_(step2*grad2.mm(Qr))
+        else: # Ql.dim()=2 and Qr.dim()=1:
+            A = Ql.mm(dG*Qr.conj())
+            Bh = torch.linalg.solve_triangular(Ql.H, dX/Qr, upper=False) # Bh is B^H
+            
+            grad1 = torch.triu(A.mm(A.H) - Bh.mm(Bh.H))
+            grad2 = torch.sum(A*A.conj(), dim=0) - torch.sum(Bh*Bh.conj(), dim=0)
+        
+            step1 = step/(norm_lower_bound(torch.abs(grad1)) + tiny)
+            step2 = step/(torch.max(torch.abs(grad2)) + tiny)
+            Ql.sub_(step1*grad1.mm(Ql)) 
+            Qr.sub_(step2*grad2*Qr)
+    else: 
+        if Qr.dim()==2: # Ql.dim()=1 and Qr.dim()=2:
+            A = (Ql[:,None]*dG).mm(Qr.H)
+            Bh = torch.linalg.solve_triangular(Qr, dX, upper=True, left=False) / (Ql.conj())[:,None] 
+            
+            grad1 = torch.sum(A*A.conj(), dim=1) - torch.sum(Bh*Bh.conj(), dim=1)
+            grad2 = torch.triu(A.H.mm(A) - Bh.H.mm(Bh))
+        
+            step1 = step/(torch.max(torch.abs(grad1)) + tiny)
+            step2 = step/(norm_lower_bound(torch.abs(grad2)) + tiny)
+            Ql.sub_(step1*grad1*Ql) 
+            Qr.sub_(step2*grad2.mm(Qr))
+        else: # Ql.dim()=1 and Qr.dim()=1:
+            A = Ql[:,None] * dG * Qr.conj()
+            Bh = dX / Qr / (Ql.conj())[:,None] 
+            
+            grad1 = torch.sum(A*A.conj(), dim=1) - torch.sum(Bh*Bh.conj(), dim=1)
+            grad2 = torch.sum(A*A.conj(), dim=0) - torch.sum(Bh*Bh.conj(), dim=0)
+        
+            step1 = step/(torch.max(torch.abs(grad1)) + tiny)
+            step2 = step/(torch.max(torch.abs(grad2)) + tiny)
+            Ql.sub_(step1*grad1*Ql) 
+            Qr.sub_(step2*grad2*Qr)
+    
+
+#@torch.jit.script
+def precond_grad_affine_math(Ql, Qr, Grad):
+    # type: (Tensor, Tensor, Tensor) -> Tensor
+    """
+    Basically a copy of function 
+        _precond_grad_dense_dense(Ql, Qr, Grad)
+    but with support of complex matrices and diagonal matrices 
+    """
+    if Ql.dim()==2:
+        if Qr.dim()==2: # Ql.dim()=2 and Qr.dim()=2:
+            return torch.linalg.multi_dot([Ql.H, Ql, Grad, Qr.H, Qr])
+        else: # Ql.dim()=2 and Qr.dim()=1:
+            return torch.linalg.multi_dot([Ql.H, Ql, Grad*(Qr*Qr.conj())])
+    else:
+        if Qr.dim()==2: # Ql.dim()=1 and Qr.dim()=2:
+            return torch.linalg.multi_dot([(Ql*Ql.conj())[:,None] * Grad, Qr.H, Qr])
+        else: # Ql.dim()=1 and Qr.dim()=1:
+            return (Ql*Ql.conj())[:,None] * Grad * (Qr*Qr.conj())
+
+
+class Affine:
+    """
+    Implements the affine group preconditioner, Q = sum_i kron(conj(Q2i), Q1i), as a class.
+
+    Args for initialization:
+        params_with_grad: a list of real or complex matrix parameters requiring gradients;
+        preconditioner_max_size: Q2i or Q1i reduces to a diagonal matrix if its size is larger than this given maximum size, otherwise a triangular matrix; 
+        preconditioner_init_scale: initial scale of Q, i.e., Q = preconditioner_init_scale*eye(), with None for automatical setting;
+        lr_params: normalized learning rate for parameters in range [0, 1];
+        lr_preconditioner: normalized learning rate for preconditioner in range [0, 1];
+        momentum: momentum factor in range [0,1);
+        grad_clip_max_norm: maximum allowable gradient norm after clipping, None for no clipping;
+        preconditioner_update_probability: probability on updating Q, 1 for updating at every step, and 0 for never, i.e., SGD when Q=I;
+        exact_hessian_vector_product: True for exact Hessian-vector product via 2nd derivative,
+                                    and False for approximate one via the finite difference method;
+        preconditioner_type: "Newton" or "whitening", see https://arxiv.org/abs/1809.10232 for the Newton and (empirical) Fisher types.  
+
+    Notes:
+        Note 1: It is necessary to set a moderate preconditioner_max_size to put the memory consumption under control if 
+        certain parameters are too large, e.g., a word embedding matrix. 
+        All the preconditioner matrices are triangular matrices if preconditioner_max_size=inf, and diagonal matrices if preconditioner_max_size=0.
+        
+        Note 2: Affine preconditioners are not black box ones. It is the user's responsibility to reparameterize their model parameters as a list of matrices. 
+            
+        Note 3: The Hessian-vector product can be approximated using the finite difference method by setting 
+        exact_hessian_vector_product = False when the 2nd derivatives is not available.
+        In this case, make sure that the closure produces the same outputs given the same inputs, 
+        except for numerical errors due to non-deterministic behaviors.
+        Random numbers, if any, used inside the closure should be generated starting from the same state, where the rng state can be
+        read and set by, e.g., `torch.cuda.get_rng_state' and `torch.cuda.set_rng_state', respectively.
+        
+        Note 4: Momentum here is the moving average of gradient so that its setting is decoupled from the learning rate.
+        This is necessary as the learning rate in PSGD is normalized.    
+        
+        Note 5: lr_params, lr_preconditioner, momentum, grad_clip_max_norm, preconditioner_update_probability, and 
+        exact_hessian_vector_product (bool) all can be reset on the fly. 
+        
+        Note 6: The affine transform matrices to be optimized can be of different data types (real or complex, single or double, etc.). 
+    """
+    def __init__(self,  params_with_grad, preconditioner_max_size=torch.inf, preconditioner_init_scale=1.0,
+                        lr_params=0.01, lr_preconditioner=0.01, momentum=0.0,
+                        grad_clip_max_norm=None, preconditioner_update_probability=1.0,
+                        exact_hessian_vector_product:bool=True, preconditioner_type="Newton"):
+        # mutable members
+        self.lr_params = lr_params
+        self.lr_preconditioner = lr_preconditioner
+        self.momentum = momentum if (0<momentum<1) else 0.0
+        self.grad_clip_max_norm = grad_clip_max_norm
+        self.preconditioner_update_probability = preconditioner_update_probability
+        self.exact_hessian_vector_product = exact_hessian_vector_product
+        # protected members
+        self._preconditioner_max_size = preconditioner_max_size
+        params_with_grad = [params_with_grad,] if isinstance(params_with_grad, torch.Tensor) else params_with_grad
+        self._params_with_grad = [param for param in params_with_grad if param.requires_grad] # double check requires_grad flag
+        for p in self._params_with_grad:
+            if p.dim() != 2:
+                raise ValueError(f"expected 2D params (got {p.dim()}D param)")    
+        self._tiny = max([torch.finfo(p.dtype).tiny for p in self._params_with_grad])
+        self._delta_param_scale = (max([torch.finfo(p.dtype).eps for p in self._params_with_grad])) ** 0.5
+        if preconditioner_init_scale is None:
+            self._Qs = None # initialize on the fly 
+        else:
+            self._Qs = [[preconditioner_init_scale**0.5 * initQ(p.shape[0], p.dtype, p.device, preconditioner_max_size), 
+                         preconditioner_init_scale**0.5 * initQ(p.shape[1], p.dtype, p.device, preconditioner_max_size)] for p in self._params_with_grad]
+        self._ms = None # momentum buffers 
+        self._preconditioner_type = preconditioner_type
+
+    @torch.no_grad()
+    def step(self, closure):
+        """
+        Performs a single step of PSGD with the affine group preconditioner, i.e., 
+        updating the trainable parameters once, and returning what closure returns.
+
+        Args:
+            closure (callable): a (stateless) closure that evaluates the function of self._params_with_grad,
+                                and returns the loss, or an iterable with the first one being loss.
+                                Random numbers, if any, used inside the closure should be generated starting 
+                                from the same rng state if exact_hessian_vector_product=False and preconditioner_type="Newton". 
+        """
+        if (self._preconditioner_type=="Newton") and ((torch.rand([]) < self.preconditioner_update_probability) or (self._Qs is None)):
+            # evaluates gradients, Hessian-vector product, and updates the preconditioner
+            if self.exact_hessian_vector_product:
+                # exact Hessian-vector product
+                with torch.enable_grad():
+                    closure_returns = closure()
+                    loss = closure_returns if isinstance(closure_returns, torch.Tensor) else closure_returns[0]
+                    grads = torch.autograd.grad(loss, self._params_with_grad, create_graph=True)
+                    vs = [torch.randn_like(p) for p in self._params_with_grad]
+                    Hvs = torch.autograd.grad(grads, self._params_with_grad, vs) # this line also works for complex matrices 
+            else:
+                # approximate Hessian-vector product via finite-difference formulae. Use it with cautions.
+                with torch.enable_grad():
+                    closure_returns = closure()
+                    loss = closure_returns if isinstance(closure_returns, torch.Tensor) else closure_returns[0]
+                    grads = torch.autograd.grad(loss, self._params_with_grad)
+                vs = [self._delta_param_scale * torch.randn_like(p) for p in self._params_with_grad]
+                [p.add_(v) for (p, v) in zip(self._params_with_grad, vs)]
+                with torch.enable_grad():
+                    perturbed_returns = closure()
+                    perturbed_loss = perturbed_returns if isinstance(perturbed_returns, torch.Tensor) else perturbed_returns[0]
+                    perturbed_grads = torch.autograd.grad(perturbed_loss, self._params_with_grad)
+                Hvs = [perturbed_g - g for (perturbed_g, g) in zip(perturbed_grads, grads)]
+            # update preconditioner 
+            # initialize Qs if it is None 
+            if self._Qs is None:
+                self._Qs = [[(torch.sum(v*v.conj())/torch.sum(h*h.conj()))**0.25 * initQ(v.shape[0], v.dtype, v.device, self._preconditioner_max_size), 
+                                                                                   initQ(v.shape[1], v.dtype, v.device, self._preconditioner_max_size)] for (v, h) in zip(vs, Hvs)]
+            # update self._Qs
+            [update_precond_affine_math_(Qlr[0], Qlr[1], v, h, self.lr_preconditioner, self._tiny) for (Qlr, v, h) in zip(self._Qs, vs, Hvs)]
+        else:
+            # only evaluates the gradients
+            with torch.enable_grad():
+                closure_returns = closure()
+                loss = closure_returns if isinstance(closure_returns, torch.Tensor) else closure_returns[0]
+                grads = torch.autograd.grad(loss, self._params_with_grad)
+            vs = None # no vs and Hvs
+        
+        # update preconditioner here if it is the whitening type 
+        if (self._preconditioner_type!="Newton") and ((torch.rand([]) < self.preconditioner_update_probability) or (self._Qs is None)):
+            if self._Qs is None:
+                self._Qs = [[(torch.numel(g)/torch.sum(g*g.conj()))**0.25 * initQ(g.shape[0], g.dtype, g.device, self._preconditioner_max_size), 
+                                                                            initQ(g.shape[1], g.dtype, g.device, self._preconditioner_max_size)] for g in grads]
+            # update the preconditioner whitening the gradients 
+            [update_precond_affine_math_(Qlr[0], Qlr[1], torch.randn_like(g), g, self.lr_preconditioner, self._tiny) for (Qlr, g) in zip(self._Qs, grads)]
+
+        # preconditioned gradients; momentum is optional      
+        if self.momentum > 0:
+            if self._ms is None:
+                self._ms = [(1 - self.momentum)*g for g in grads]
+            else:
+                [m.mul_(self.momentum).add_(g, alpha=1 - self.momentum) for (m, g) in zip(self._ms, grads)]
+            pre_grads = [precond_grad_affine_math(Qlr[0], Qlr[1], m) for (Qlr, m) in zip(self._Qs, self._ms)]
+        else:
+            self._ms = None # clean the buffer when momentum is set to zero 
+            pre_grads = [precond_grad_affine_math(Qlr[0], Qlr[1], g) for (Qlr, g) in zip(self._Qs, grads)]
+            
+        # gradient clipping is optional
+        if self.grad_clip_max_norm is None:
+            lr = self.lr_params
+        else:
+            grad_norm = torch.sqrt(torch.abs(sum([torch.sum(g*g.conj()) for g in pre_grads]))) + self._tiny
+            lr = self.lr_params * min(self.grad_clip_max_norm/grad_norm, 1.0)
+            
+        # update the parameters
+        if self.exact_hessian_vector_product or (vs is None) or (self._preconditioner_type!="Newton"):
+            [param.subtract_(lr*g) for (param, g) in zip(self._params_with_grad, pre_grads)]
+        else: # in this case, do not forget to remove the perturbation on parameters
+            [param.subtract_(lr*g + v) for (param, g, v) in zip(self._params_with_grad, pre_grads, vs)]        
+        
+        # return whatever closure returns
+        return closure_returns
+
+################## end of the Affine preconditioner #################################
