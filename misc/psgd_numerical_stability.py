@@ -76,7 +76,7 @@ for i in range(num_iterations):
 ax1.semilogy(Loss, "k")
 
 ax1.set_xlabel("Iteration")
-ax1.set_ylabel("Preconditioner fitting loss")
+ax1.set_ylabel(r"$P$ fitting loss tr$(PH^2+P^{-1}-2H)$")
 ax1.set_title("Diagonal preconditioner")
 ax1.legend(["Closed-form solution", r"PSGD, lr $0.1\rightarrow 0.01$"])
 
