@@ -16,6 +16,10 @@ Updates in 2023:
 Added gradient whitening preconditioner. 
 Replaced matrix norm lower bound max(abs(A)) with sqrt(max(max_i sum_j a_ij^2, max_j sum_i a_ij^2)).
 Initialize Q to ((v^T*v)/(h^T*h))^(1/4)*I if the initial scale of Q is set to None.
+Wrapped affine family as a class.
+
+Updates in 2024:
+Further tightened lower bound of a matrix spectral norm (see norm_lower_bound). 
 """
 
 import torch
@@ -23,10 +27,27 @@ import torch
 
 def norm_lower_bound(A):
     """
-    returns a cheap lower bound for the spectral norm of A
+    Returns a cheap lower bound for the spectral norm of A.
+    Numerical results on random matrices with a wide range of distributions and sizes suggest,
+        norm(A) <= sqrt(2) * norm_lower_bound(A)
+    Looks to be a very tight lower bound.
     """
-    A = A*A
-    return torch.sqrt(torch.maximum(torch.max(torch.sum(A, 0)), torch.max(torch.sum(A, 1))))
+    aa = torch.real(A * A.conj())
+    value0, i = torch.max(torch.sum(aa, dim=0), 0)
+    value1, j = torch.max(torch.sum(aa, dim=1), 0)
+    if value0 > value1:
+        x = A[:, i].conj() @ A
+        # We must have norm(x) > 0 since norm(x) >= value0 > value1 >= 0
+        # Also, avoid expression norm(x*A^H)/norm(x) as x*A^H could under/over flow
+        return torch.linalg.vector_norm((x / torch.linalg.vector_norm(x)) @ A.H)
+    else:
+        x = A @ A[j].conj()
+        normx = torch.linalg.vector_norm(x)
+        if normx > 0:
+            # Again, avoid expression norm(A^H*x)/norm(x) as A^H*x could under/over flow
+            return torch.linalg.vector_norm(A.H @ (x / normx))
+        else:  # A = 0
+            return normx
     
 
 ###############################################################################
@@ -1251,8 +1272,8 @@ def update_precond_affine_math_(Ql, Qr, dX, dG, step, tiny):
             grad1 = torch.triu(A.mm(A.H) - Bh.mm(Bh.H))
             grad2 = torch.triu(A.H.mm(A) - Bh.H.mm(Bh))
         
-            step1 = step/(norm_lower_bound(torch.abs(grad1)) + tiny)
-            step2 = step/(norm_lower_bound(torch.abs(grad2)) + tiny)
+            step1 = step/(norm_lower_bound(grad1) + tiny)
+            step2 = step/(norm_lower_bound(grad2) + tiny)
             Ql.sub_(step1*grad1.mm(Ql)) 
             Qr.sub_(step2*grad2.mm(Qr))
         else: # Ql.dim()=2 and Qr.dim()=1:
@@ -1262,7 +1283,7 @@ def update_precond_affine_math_(Ql, Qr, dX, dG, step, tiny):
             grad1 = torch.triu(A.mm(A.H) - Bh.mm(Bh.H))
             grad2 = torch.sum(A*A.conj(), dim=0) - torch.sum(Bh*Bh.conj(), dim=0)
         
-            step1 = step/(norm_lower_bound(torch.abs(grad1)) + tiny)
+            step1 = step/(norm_lower_bound(grad1) + tiny)
             step2 = step/(torch.max(torch.abs(grad2)) + tiny)
             Ql.sub_(step1*grad1.mm(Ql)) 
             Qr.sub_(step2*grad2*Qr)
@@ -1275,7 +1296,7 @@ def update_precond_affine_math_(Ql, Qr, dX, dG, step, tiny):
             grad2 = torch.triu(A.H.mm(A) - Bh.H.mm(Bh))
         
             step1 = step/(torch.max(torch.abs(grad1)) + tiny)
-            step2 = step/(norm_lower_bound(torch.abs(grad2)) + tiny)
+            step2 = step/(norm_lower_bound(grad2) + tiny)
             Ql.sub_(step1*grad1*Ql) 
             Qr.sub_(step2*grad2.mm(Qr))
         else: # Ql.dim()=1 and Qr.dim()=1:
