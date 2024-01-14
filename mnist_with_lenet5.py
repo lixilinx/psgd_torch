@@ -56,7 +56,7 @@ grad_norm_clip_thr = 0.1*sum(W.numel() for W in lenet5.parameters())**0.5
 TrainLosses, best_test_loss = [], 1.0
 for epoch in range(10):
     for _, (data, target) in enumerate(train_loader):
-        loss = train_loss(data, target)
+        loss = train_loss(data, target) + 1e-6*sum([torch.sum(p*p) for p in lenet5.parameters()]) 
         grads = torch.autograd.grad(loss, lenet5.parameters(), create_graph=True)
         vs = [torch.randn_like(W) for W in lenet5.parameters()]
         Hvs = torch.autograd.grad(grads, lenet5.parameters(), vs) 
