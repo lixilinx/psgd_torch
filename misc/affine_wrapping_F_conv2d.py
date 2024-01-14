@@ -144,7 +144,7 @@ for epoch in range(10):
         data, target = data.to(device), target.to(device)
 
         def closure():
-            return train_loss(data, target)
+            return train_loss(data, target) + 1e-6*sum([torch.sum(p*p) for p in opt._params_with_grad])
 
         TrainLosses.append(opt.step(closure).item())
 

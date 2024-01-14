@@ -102,7 +102,7 @@ class AffineRNN(torch.nn.Module):
             # w = torch.empty(input_size + hidden_size, hidden_size).uniform_(
             #     -(input_size+hidden_size)**(-0.5), (input_size+hidden_size)**(-0.5)
             # )
-            w[input_size:] = torch.qr(w[input_size:])[0]
+            w[input_size:] = torch.linalg.qr(w[input_size:])[0]
             b = torch.zeros(1, hidden_size)
             return torch.cat([w, b])
 
@@ -174,7 +174,8 @@ class Model(torch.nn.Module):
     def __init__(self):
         super(Model, self).__init__()
         self.rnn = AffineRNN(dim_in, dim_hidden)
-        self.linear_wb = torch.nn.Parameter(0.1 * torch.randn(dim_hidden + 1, dim_out))
+        self.linear_wb = torch.nn.Parameter(torch.cat([0.1 * torch.randn(dim_hidden, dim_out), 
+                                                       torch.zeros(1, dim_out)]))
 
     def forward(self, xs):
         _, h = self.rnn(xs, torch.zeros(1, batch_size, dim_hidden))
