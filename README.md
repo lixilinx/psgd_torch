@@ -1,7 +1,7 @@
 ## Pytorch implementation of PSGD 
 *Major recent updates*: added gradient whitening preconditioners to all classes; wrapped affine preconditioners as a class (also support complex matrices); tighter lower bound for matrix spectral norm.
 ### An overview
-PSGD (Preconditioned SGD) is a general purpose (mathematical or stochastic, convex or nonconvex optimizations) 2nd order optimizer. Unlike many 2nd order optimizers, PSGD is numerically stable and does not need any damping terms.    
+PSGD (Preconditioned SGD) is a general purpose (mathematical or stochastic, convex or nonconvex) 2nd order optimizer. Unlike many 2nd order optimizers, PSGD does not rely on damping terms to stabilize it.    
 #### A brief summary of the math. 
 Notations: $H$ the Hessian; $h=Hv$ the Hessian-vector product; $g$ the gradient; $P=Q^TQ$ the preconditioner.
 
@@ -9,7 +9,7 @@ Notations: $H$ the Hessian; $h=Hv$ the Hessian-vector product; $g$ the gradient;
   
 | Preconditioner fitting loss | Solution | Notes |
 |--------------|------------------|-------|
-|$h^TPh + v^TP^{-1}v$ | $Ph(Ph)^T = vv^T$ | Reduces to $Ph=v$ when  $H\succ 0$, i.e., Quasi-Newton methods like BFGS. The default fitting loss in our implementations.  | 
+|$h^TPh + v^TP^{-1}v$ | $Ph(Ph)^T = vv^T$ | Reduces to $Ph=v$ when  $H\succ 0$, i.e., secant equation for Quasi-Newton methods like BFGS. The default fitting loss in our implementations.  | 
 | $E_{v\sim\mathcal{N}(0,I)}[h^TPh + v^TP^{-1}v] = {\rm tr}\left(PH^2 + P^{-1}\right)$ | $P=(H^2)^{-1/2}$ | Reduces to Newton method when  $H\succ 0$. Its diagonal solution $P={\rm diag}(1/\sqrt{E[h^2]})$ is rediscovered in many places, e.g., ESGD, AdaHessian, Sophia, etc.  | 
 | $E_{v\sim\mathcal{N}(0,I)}[g^TPg + v^TP^{-1}v] = {\rm tr}\left(PE[gg^T] + P^{-1}\right)$ | $P=(E[gg^T])^{-1/2}$ | Reduces to gradient whitening methods, e.g., the AdaGrad family like Adam(W), RMAProp, Shampoo, etc. With per-sample gradient $g$, $P^{-2}$ reduces to the (empirical) Fisher or Gauss-Newton matrix.  | 
 
@@ -17,11 +17,11 @@ Notations: $H$ the Hessian; $h=Hv$ the Hessian-vector product; $g$ the gradient;
 
 |Preconditioner form|Group|Notes|
 |-------------------|-----|-----|
-| $Q\in \mathbb{R}^{N\times N}$, $\det(Q)>0$ | ${\rm GL}^{+}(N, \mathbb{R})$ or ${\rm Tri}^{+}(N, \mathbb{R})$ | Related to methods like Newton, BFGS, etc. Only practical with $N\le 10^4$ due to $\mathcal{O}(N^3)$ complexity. See our Newton preconditioner.  |
+| $Q\in \mathbb{R}^{N\times N}$, $\det(Q)>0$ | ${\rm GL}^{+}(N, \mathbb{R})$ or ${\rm Tri}^{+}(N, \mathbb{R})$ | Related to methods like Newton, BFGS, etc. Only practical with $N\le 10^4$. See our Newton preconditioner.  |
 | $Q={\rm diag}(q_1, \ldots, q_N)$, $q_n>0$ $\forall$ $n$ | Diagonal subgroup | Related to methods with element-wise preconditioning (the most popular choice).    |
-| $Q=\oplus_{\ell=1}^L  \left[ (Q_{2, \ell}^TQ_{2, \ell}) \otimes (Q_{1, \ell}^TQ_{1, \ell}) \right] $  | Each $Q_{i,\ell}$'s group can be different  | Related to KFAC, Shampoo, etc. Our implementation also supports complex matrices, and $Q_{i,\ell}$ can be diagonal to save resources if too large. See our Affine preconditioner. |   
+| $Q=\oplus_{\ell=1}^L  \left[ (Q_{2, \ell}^TQ_{2, \ell}) \otimes (Q_{1, \ell}^TQ_{1, \ell}) \right] $  | Each $Q_{i,\ell}$'s group can be different, typically affine group  | Related to KFAC, Shampoo, etc. Our implementation also supports complex matrices, and $Q_{i,\ell}$ can be diagonal to save resources if too large. See our Affine preconditioner. |
 | $Q = UV^T + {\rm diag}(d_1, \ldots, d_N)$, $U$ and $V$ $\in \mathbb{R}^{N\times r}$, $d_n>0$, $\det(Q)>0$, and $0\le r\ll N$ | [Here](https://drive.google.com/file/d/1CTNx1q67_py87jn-0OI-vSLcsM1K7VsM/view) for details | Related to LM-BFGS, nonlinear CG, etc. See our LRA (low-rank approximation) preconditioner. |      
-
+  
 #### Highlights of PSGD 
 ##### Normalized step sizes 
 The two learning rates (lr) of PSGD are self-normalized to range [0, 1] as below:
@@ -33,7 +33,7 @@ See the [Rosenbrock function demo](https://github.com/lixilinx/psgd_torch/blob/m
 <img src="https://github.com/lixilinx/psgd_torch/blob/master/misc/quadratic_convergence.svg" width=40% height=40%>
 
 ##### Efficiency
-PSGD is cheaper per step than those classic methods like BFGS as it does not rely on line search. See the [tensor rank decomposition benchmark](https://github.com/lixilinx/psgd_torch/blob/master/demo_usage_of_all_preconditioners.py) for the following typical comparison results.      
+PSGD is cheaper per step than classic methods like BFGS as it does not rely on line search. See the [tensor rank decomposition benchmark](https://github.com/lixilinx/psgd_torch/blob/master/demo_usage_of_all_preconditioners.py) for the following typical comparison results.      
 
 <img src="https://github.com/lixilinx/psgd_torch/blob/master/misc/psgd_vs_bfgs.svg" width=40% height=40%>
 
@@ -61,7 +61,7 @@ Most neural networks consist of affine transformations and simple activation fun
 These preconditioners are wrapped into classes *XMat*, *LRA* (or *UVd*), *Newton* and *Affine* for easy use. The affine family are not black box preconditioners, and the users need to either group the gradients into matrices or reform the models such that the parameters are a list of matrices, e.g., [this demo](https://github.com/lixilinx/psgd_torch/blob/master/misc/affine_wrapping_F_conv2d.py) on wrapping torch.nn.functional.conv2d as an affine Conv2d class, and [this one](https://github.com/lixilinx/psgd_torch/blob/master/misc/affine_wrapping_VF_rnn_tanh.py) on wrapping torch._VF.rnn_tanh as an affine RNN class. Three main differences from torch.optim.SGD: 
 1) The loss to be minimized is passed through as a closure to the optimizer to support more complicated behaviors, notably, Hessian-vector product approximation with finite difference method when the 2nd order derivative is not available.   
 2) Momentum here is the moving average of gradient so that its setting is decoupled from the learning rate, which is always normalized in PSGD. 
-3) As any other regularizations, (coupled) weight decay should be explicitly realized by adding L2 regularization to the loss. Similarly, decoupled weight decay is not included inside the PSGD implementations.    
+3) As any other regularizations, (coupled) weight decay should be explicitly realized by adding $L2$ regularization to the loss. Similarly, decoupled weight decay is not included inside the PSGD implementations.    
 
 ### Demos on a few classic problems
 [Rosenbrock function](https://github.com/lixilinx/psgd_torch/blob/master/hello_psgd.py): a simple example of PSGD on the Rosenbrock function minimization.
