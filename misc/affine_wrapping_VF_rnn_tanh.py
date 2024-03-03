@@ -184,8 +184,13 @@ class Model(torch.nn.Module):
 model = Model()
 
 opt = psgd.Affine(
-    model.parameters(), grad_clip_max_norm=1.0, exact_hessian_vector_product=False
+    model.parameters(), preconditioner_init_scale=None, lr_params=0.01, lr_preconditioner=0.01, 
+    grad_clip_max_norm=1.0, exact_hessian_vector_product=False
 )
+# opt = psgd.LRA(
+#     model.parameters(), preconditioner_init_scale=None, lr_params=0.01, lr_preconditioner=0.01, 
+#     grad_clip_max_norm=1.0, exact_hessian_vector_product=False
+# )
 
 def train_loss(xy_pair):  # logistic loss
     return -torch.mean(torch.log(torch.sigmoid(xy_pair[1] * model(xy_pair[0]))))

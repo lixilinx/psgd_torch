@@ -1,20 +1,3 @@
-"""
-Closed-form solution vs PSGD for preconditioner estimation using Hessian-vector product.
-
-The ultimate closed-form solution for P can be obtained by solving linear system
-
-    P*[h1, h2, h3, ...] = [v1, v2, v3, ...]
-
-for P given enough independent (vector, Hessian-vector-product) pairs, (v, h).
-However, this form of solution is not practical in a setting with negative curvature, or gradient noise, or limited resources, or changing Hessian.
-
-Here, I consider the commonly used closed-form solution
-
-    P = inv(sqrtm(E[h*h^T]))    when    v ~ N(0, I)
-
-It is not a surprise that PSGD could outperform the above closed-form solution by solve system P*h=v online.
-More importantly, PSGD is numerically stable.
-"""
 import sys
 
 import matplotlib.pyplot as plt
@@ -23,152 +6,230 @@ import torch
 sys.path.append("..")
 import preconditioned_stochastic_gradient_descent as psgd
 
-device = torch.device("cpu")
+# torch.set_default_device("cuda:0")
 
-for mc_trial in range(100):
-    ax1 = plt.subplot(121)
-    ax2 = plt.subplot(122)
-    ax2.yaxis.tick_right()
+plt.figure(figsize=[9, 4])
+ax1 = plt.subplot(131)
+ax2 = plt.subplot(132)
+ax3 = plt.subplot(133)
+ax1.yaxis.tick_right()
+ax2.yaxis.tick_right()
+ax3.yaxis.tick_right()
 
-    """
-    The diagonal preconditioner is re-discovered in many places.
-    P for this simplest form of PSGD has closed-form solution:
-
-        Newton type:                P = 1/sqrt(E[h^2]) where v ~ N(0, 1) and h = H*v
-        Gradient whitening type:    P = 1/sqrt(E[g^2]) where g is the gradient
-
-    This example shows that it is still beneficial to fit such a simple P on Lie group.
-    """
-    N = 100000  # number of params
-    num_iterations = 10000
-
-    if torch.randn([]) < 1 / 3:
-        H = torch.rand(N, device=device)  # diagonal hessian, eigs ~ U[0, 1]
-        print("draw diagonals from Uniform distribution")
-    elif torch.randn([]) < 1 / 2:
-        H = torch.empty(N, device=device).exponential_()  # diagonal hessian, eigs ~ Exp
-        print("draw diagonals from Exponential distribution")
+N = 50
+H = torch.zeros(N, N)
+for i in range(N):
+    H[max(i - 1, 0), i] = 0.5
+    H[i, max(i - 1, 0)] = 0.5
+    H[i, i] = 1
+# H = torch.randn(N, N)
+# H = H@H.t()/N
+I = torch.eye(N)
+for count, eps in enumerate([0, 1e-2]):
+    if count == 0:
+        ax = ax1
+        num_iterations = 150000
     else:
-        H = torch.exp(torch.randn(N, device=device))  # diagonal hessian, eigs ~ LogNormal
-        print("draw diagonals from LogNormal distribution")
-    print(f"Hessian cond number: {(torch.max(H)/torch.min(H)).item()}\n")
+        ax = ax2
+        num_iterations = 50000
 
-    """
-    closed-form solution for P
-    """
-    hh = torch.zeros(N, device=device) + 2 ** (-23)
+    if eps == 0:
+        H1 = H.clone()
+    else:
+        L, U = torch.linalg.eigh((H @ H.t() + eps**2 * I).to(torch.float64))
+        H1 = (U @ torch.diag(torch.sqrt(L)) @ U.t()).to(torch.float32)
+
+    # fitting on Lie group
+    Q, invQ = torch.eye(N), torch.eye(N)
+    if eps == 0:
+        step = 1.0
+    else:
+        step = 0.2
     Loss = []
     for i in range(num_iterations):
-        v = torch.randn(N, device=device)
-        h = H * v
-        if i / (i + 1) < 0.999:
-            hh = i / (i + 1) * hh + 1 / (i + 1) * h * h
-        else:
-            hh = 0.999 * hh + 0.001 * h * h
+        v = torch.randn(N, 1)
+        h = H @ v + eps * torch.randn(N, 1)
 
-        P = hh ** (-0.5)
-        loss = torch.abs(torch.sum(P * H * H + 1 / P - 2 * H)) # numerical error may cause loss < 0
+        psgd.update_precond_newton_math_(Q, invQ, v, h, step, "2nd", 0.0)
+
+        loss = torch.linalg.matrix_norm(Q.t() @ Q @ H1 - I)
         Loss.append(loss.item())
 
-    ax1.semilogy(Loss, "r")
-
-    """
-    fitting on the group of diagonal matrix with PSGD; lr annealing from 0.1 to 0.01
-    """
-    Q = torch.ones(N, device=device)
+    ax.semilogy(Loss, "k")
+    
+    # fitting on Lie group
+    Q, invQ = torch.eye(N), None
+    if eps == 0:
+        step = 1.0
+    else:
+        step = 0.2
     Loss = []
     for i in range(num_iterations):
-        v = torch.randn(N, device=device)
-        h = H * v
+        v = torch.randn(N, 1)
+        h = H @ v + eps * torch.randn(N, 1)
 
-        if i == 0:
-            Q = (torch.sum(v * v) / torch.sum(h * h)) ** 0.25 * Q
+        psgd.update_precond_newton_math_(Q, invQ, v, h, step, "2nd", 0.0)
 
-        grad = Q * Q * h * h - v * v / (Q * Q)
-        Q = (1 - 0.1 * 0.1 ** (i / (num_iterations - 1)) * grad / torch.max(torch.abs(grad))) * Q
-
-        P = Q * Q
-        loss = torch.abs(torch.sum(P * H * H + 1 / P - 2 * H)) # numerical error may cause loss < 0
+        loss = torch.linalg.matrix_norm(Q.t() @ Q @ H1 - I)
         Loss.append(loss.item())
 
-    ax1.semilogy(Loss, "k")
+    ax.semilogy(Loss, "b")
 
-    ax1.set_xlabel("Iteration")
-    ax1.set_ylabel(r"$P$ fitting loss tr$(PH^2+P^{-1}-2H)$")
-    ax1.set_title("Diagonal preconditioner")
-    ax1.legend([r"Closed-form, $P=(E[h^2])^{-0.5}$", r"PSGD, lr $0.1 \, \searrow \, 0.01$"], fontsize=8)
-
-    """
-    A dense preconditioner has closed-form solution:
-
-        Newton type:                P = inv(sqrtm(E[h h^T])) where v ~ N(0, 1) and h = H*v
-        Gradient whitening type:    P = inv(sqrtm(E[g g^T])) where g is the gradient
-
-    The closed-form solution could suffer a lot from numerical errors when cond(H)>>1, while PSGD does not.
-    """
-    N = 100
-    num_iterations = 20000
-
-    if torch.rand([]) < 0.5:
-        H = torch.randn(N, N, device=device)
-        print("draw sqrtm(H) from Normal distribution")
-    else:
-        H = torch.rand(N, N, device=device) - 0.5
-        print("draw sqrtm(H) from Uniform distribution")
-
-    if torch.rand([]) < 0.5:
-        H = torch.linalg.inv(H)
-        print("further taking inverse")
-
-    H = H @ H.t()
-    print(f"Hessian cond number: {torch.linalg.cond(H).item()}\n")
-
-    """
-    closed-form solution
-    """
+    # closed-form solution
     Loss = []
-    hh = torch.eye(N, device=device) * 2 ** (-23)
+    hh = torch.eye(N)
     for i in range(num_iterations):
-        v = torch.randn(N, 1, device=device)
-        h = H @ v
+        v = torch.randn(N, 1)
+        h = H @ v + eps * torch.randn(N, 1)
 
-        if i / (i + 1) < 0.999:
-            hh = i / (i + 1) * hh + 1 / (i + 1) * (h @ h.t())
+        if (i + 1) / (i + 2) < 0.999:
+            hh = (i + 1) / (i + 2) * hh + 1 / (i + 2) * (h @ h.t())
         else:
             hh = 0.999 * hh + 0.001 * (h @ h.t())
 
         L, U = torch.linalg.eigh(hh)
-        L[L < 2 ** (-23)] = 2 ** (-23)  # could have negative eigs due to numerical error; clip to eps
+        # L[L < 1e-6] = 1e-6
         P = U @ torch.diag(torch.rsqrt(L)) @ U.t()
-        loss = torch.abs(torch.trace(P @ H @ H + torch.linalg.inv(P) - 2 * H)) # numerical error could cause loss < 0
+        loss = torch.linalg.matrix_norm(P @ H1 - I)
         Loss.append(loss.item())
 
-    ax2.semilogy(Loss, "r")
+    ax.semilogy(Loss, "r")
 
-    """
-    PSGD with lr annealing from 0.1 to 0.01
-    """
-    Q = torch.eye(N, device=device)
+    # bfgs
     Loss = []
+    P = torch.eye(N)
     for i in range(num_iterations):
-        v = torch.randn(N, 1, device=device)
-        h = H @ v
+        v = torch.randn(N, 1)
+        h = H @ v + eps * torch.randn(N, 1)
+        if v.t() @ h < 0:
+            h = -h  # to avoid P<0
 
-        if i == 0:
-            Q = (torch.sum(v * v) / torch.sum(h * h)) ** 0.25 * Q
-
-        psgd.update_precond_newton_math_(Q, v, h, 0.1 * 0.1 ** (i / (num_iterations - 1)), 0.0)
-
-        P = Q.t() @ Q
-        loss = torch.abs(torch.trace(P @ H @ H + torch.linalg.inv(P) - 2 * H)) # numerical error could cause loss < 0
+        P = (
+            P
+            + (v.t() @ h + h.t() @ P @ h) * (v @ v.t()) / (h.t() @ v) ** 2
+            - (P @ h @ v.t() + v @ h.t() @ P) / (v.t() @ h)
+        )
+        loss = torch.linalg.matrix_norm(P @ H1 - I)
         Loss.append(loss.item())
 
-    ax2.semilogy(Loss, "k")
+    ax.semilogy(Loss, "m")
 
-    ax2.legend([r"Closed-form, $P=(E[hh^T])^{-0.5}$", r"PSGD, lr $0.1 \, \searrow \, 0.01$"], fontsize=8)
-    ax2.set_xlabel("Iteration")
-    # ax2.set_ylabel("Preconditioner fitting loss")
-    ax2.set_title("Dense preconditioner")
+    ax.legend(
+        [
+            r"PSGD, GL(n,R)",
+            r"PSGD, Tri",
+            r"$P=(E[hh^T])^{-0.5}$",
+            "BFGS",
+        ],
+        fontsize=7,
+    )
+    ax.set_xlabel("Iterations", fontsize=8)
+    ax.tick_params(labelsize=6)
+    if count == 0:
+        ax.set_ylabel(r"$||PH' - I||_F$", fontsize=8)
+        ax.set_title(r"(a) Clean $Hv$", fontsize=8)
+    else:
+        # ax.set_ylabel(r"$||PH' - I||_F$", fontsize=8)
+        ax.set_title(r"(b) Noisy $Hv$", fontsize=8)
 
-    plt.savefig(f"psgd_numerical_stability_trial{mc_trial}.svg")
-    plt.show()
+
+####################################################
+ax = ax3
+num_iterations = 100000
+
+# fitting on Lie group, fixed step size 1
+Q, invQ = torch.eye(N), torch.eye(N)
+H = torch.ones(N, N) / 4
+Loss = []
+for i in range(num_iterations):
+    u = torch.rand(N, 1)
+    H = H + u @ u.t()
+    v = torch.randn(N, 1)
+    h = H @ v
+
+    psgd.update_precond_newton_math_(Q, invQ, v, h, 1.0, "2nd", 0.0)
+
+    loss = torch.linalg.matrix_norm(Q.t() @ Q @ H - I)
+    Loss.append(loss.item())
+
+ax.loglog(Loss, "k")
+
+# fitting on Lie group, fixed step size 1
+Q, invQ = torch.eye(N), None
+H = torch.ones(N, N) / 4
+Loss = []
+for i in range(num_iterations):
+    u = torch.rand(N, 1)
+    H = H + u @ u.t()
+    v = torch.randn(N, 1)
+    h = H @ v
+
+    psgd.update_precond_newton_math_(Q, invQ, v, h, 1.0, "2nd", 0.0)
+
+    loss = torch.linalg.matrix_norm(Q.t() @ Q @ H - I)
+    Loss.append(loss.item())
+
+ax.loglog(Loss, "b")
+
+# closed-form solution
+Loss = []
+hh = torch.eye(N)
+H = torch.ones(N, N) / 4
+for i in range(num_iterations):
+    u = torch.rand(N, 1)
+    H = H + u @ u.t()
+    v = torch.randn(N, 1)
+    h = H @ v
+
+    if (i + 1) / (i + 2) < 0.999:
+        hh = (i + 1) / (i + 2) * hh + 1 / (i + 2) * (h @ h.t())
+    else:
+        hh = 0.999 * hh + 0.001 * (h @ h.t())
+
+    L, U = torch.linalg.eigh(hh)
+    # L[L < 1e-6] = 1e-6
+    P = U @ torch.diag(torch.rsqrt(L)) @ U.t()
+    loss = torch.linalg.matrix_norm(P @ H - I)
+    Loss.append(loss.item())
+
+ax.loglog(Loss, "r")
+
+# bfgs
+Loss = []
+P = torch.eye(N)
+H = torch.ones(N, N) / 4
+for i in range(num_iterations):
+    u = torch.rand(N, 1)
+    H = H + u @ u.t()
+    v = torch.randn(N, 1)
+    h = H @ v
+    if v.t() @ h < 0:
+        h = -h  # to avoid P<0
+
+    P = (
+        P
+        + (v.t() @ h + h.t() @ P @ h) * (v @ v.t()) / (h.t() @ v) ** 2
+        - (P @ h @ v.t() + v @ h.t() @ P) / (v.t() @ h)
+    )
+    loss = torch.linalg.matrix_norm(P @ H - I)
+    Loss.append(loss.item())
+
+ax.loglog(Loss, "m")
+
+ax.legend(
+    [
+        r"PSGD, GL(n,R)",
+        r"PSGD, Tri",
+        r"$P=(E[hh^T])^{-0.5}$",
+        "BFGS",
+    ],
+    fontsize=7,
+)
+ax.set_xlabel("Iterations", fontsize=8)
+ax.tick_params(labelsize=6)
+# ax.set_ylabel(r"$||PH - I||_F$", fontsize=8)
+ax.set_title(r"(c) Time-varying $H$", fontsize=8)
+
+# plt.tight_layout()
+plt.savefig("psgd_numerical_stability.svg")
+plt.show()

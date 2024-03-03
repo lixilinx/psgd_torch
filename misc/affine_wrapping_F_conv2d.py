@@ -136,7 +136,8 @@ def test_loss():
     return num_errs.item() / len(test_loader.dataset)
 
 
-opt = psgd.Affine(lenet5.parameters(), lr_params=0.1, grad_clip_max_norm=20.0)
+opt = psgd.Affine(lenet5.parameters(), preconditioner_init_scale=None, lr_params=0.1, lr_preconditioner=0.1, grad_clip_max_norm=10.0)
+# opt = psgd.LRA(lenet5.parameters(), preconditioner_init_scale=None, lr_params=0.1, lr_preconditioner=0.1, grad_clip_max_norm=10.0)
 
 TrainLosses, best_test_loss = [], 1.0
 for epoch in range(10):

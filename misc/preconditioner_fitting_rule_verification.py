@@ -26,8 +26,8 @@ init_scale = (N / torch.trace(H @ H)) ** 0.25
 
 loss0 = torch.trace(init_scale**2 * H @ H - 2 * H) + N / init_scale**2
 
-for step in [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1]:
-    Q = init_scale * torch.eye(N, device=device)
+for step in [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2]:
+    Q, invQ = init_scale * torch.eye(N, device=device), torch.eye(N, device=device) / init_scale
     Loss = []
     for i in range(num_iterations):
         P = Q.t() @ Q
@@ -39,7 +39,7 @@ for step in [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1]:
 
         v = torch.randn(N, 1, device=device)
         h = H @ v
-        psgd.update_precond_newton_math_(Q, v, h, step, 0.0)
+        psgd.update_precond_newton_math_(Q, invQ, v, h, step, '2nd', 0.0)
 
     if loss > loss0:
         break
@@ -80,8 +80,7 @@ if torch.rand([]) < 0.5:
 else:
     print("LRA for dense Hessian")
 
-for step in [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 0.99]:
-    # step=1 for sure will diverge. so max step is 0.99
+for step in [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2]:
     d = init_scale * torch.ones(N, 1, device=device)
     U = torch.randn(N, r, device=device) / (N * (r + 10)) ** 0.5
     V = torch.randn(N, r, device=device) / (N * (r + 10)) ** 0.5
@@ -97,7 +96,7 @@ for step in [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 0.99]:
 
         v = torch.randn(N, 1, device=device)
         h = H @ v
-        psgd.update_precond_UVd_math_(U, V, d, v, h, step, 0.0)
+        psgd.update_precond_UVd_math_(U, V, d, v, h, step, '2nd', 0.0)
 
     if loss > loss0:
         break
