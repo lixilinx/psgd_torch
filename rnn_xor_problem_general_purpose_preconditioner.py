@@ -50,21 +50,10 @@ class Model(torch.nn.Module):
         return h @ self.W2 + self.b2
 
 model = Model().to(device)
-# initialize the PSGD optimizer with the low-rank approximation preconditioner 
-opt = psgd.UVd(model.parameters(),
-               # rank_of_approximation=10, preconditioner_init_scale=1.0,
-               # lr_params=0.01, lr_preconditioner=0.01, momentum=0.9,
-               grad_clip_max_norm=1.0, # preconditioner_update_probability=1.0,
-               # exact_hessian_vector_product=True
-               )
-"""
-# initialize the PSGD optimizer with the X-matrix preconditioner 
-opt = psgd.XMat(model.parameters(),
-                preconditioner_init_scale=1.0,
-                lr_params=0.01, lr_preconditioner=0.01, momentum=0.9, 
-                grad_clip_max_norm=1.0, preconditioner_update_probability=1.0,
-                exact_hessian_vector_product=True)
-"""
+# choose a flavor of PSGD 
+# opt = psgd.Newton(model.parameters(), preconditioner_init_scale=None, lr_params=0.01, lr_preconditioner=0.01, grad_clip_max_norm=1.0)
+opt = psgd.LRA(model.parameters(), preconditioner_init_scale=None, lr_params=0.01, lr_preconditioner=0.01, grad_clip_max_norm=1.0)
+# opt = psgd.XMat(model.parameters(), preconditioner_init_scale=None, lr_params=0.01, lr_preconditioner=0.01, grad_clip_max_norm=1.0)
 
 def train_loss(xy_pair):  # logistic loss
     return -torch.mean(torch.log(torch.sigmoid(xy_pair[1] * model(xy_pair[0]))))
@@ -86,13 +75,6 @@ for num_iter in range(100000):
     loss = opt.step(closure)
     Losses.append(loss.item())
     print('Iteration: {}; loss: {}'.format(num_iter, Losses[-1]))
-    if num_iter+1 == 1000: # feel free to reschedule these mutable settings on the fly 
-        # opt.lr_params = 0.01
-        # opt.lr_preconditioner = 0.01
-        # opt.momentum = 0.0
-        # opt.grad_clip_max_norm = 1.0
-        # opt.preconditioner_update_probability = 1.0
-        opt.exact_hessian_vector_product = False
 
     if Losses[-1] < 0.1:
         print('Deemed to be successful and ends training')

@@ -11,11 +11,11 @@ import torch
 torch.set_default_device(torch.device("cuda:0"))
 
 for mc_trial in range(100):
-    # let's try a bunch of MC runs. 
+    # let's try a bunch of MC runs.
     R, I, J, K = 10, 20, 50, 100
 
     xyz0 = [
-        torch.randn(R, I),  # the truth for decomposition 
+        torch.randn(R, I),  # the truth for decomposition
         torch.randn(R, J),
         torch.randn(R, K),
     ]
@@ -33,9 +33,10 @@ for mc_trial in range(100):
         err = T - Reconstructed
         return torch.sum(err * err)
 
-    num_iterations = 1000
+    num_iterations = 2000
     ax1 = plt.subplot(121)
     ax2 = plt.subplot(122)
+    ax1.yaxis.tick_right()
     ax2.yaxis.tick_right()
 
     """
@@ -50,9 +51,7 @@ for mc_trial in range(100):
     t0 = time.time()
     for epoch in range(num_iterations):
         opt.zero_grad()
-        f_value = f(*xyz) + 2 ** (-23) * sum(
-            [torch.sum(torch.rand_like(p) * p * p) for p in xyz]
-        )
+        f_value = f(*xyz) + 2 ** (-23) * sum([torch.sum(p * p) for p in xyz])
         f_values.append(f_value.item())
         f_value.backward()
         opt.step()
@@ -69,7 +68,7 @@ for mc_trial in range(100):
     xyz = copy.deepcopy(xyz0)
     [w.requires_grad_(True) for w in xyz]
     opt = torch.optim.LBFGS(
-        xyz, lr=0.1
+        xyz, lr=0.1, max_iter=10, history_size=10
     )  # diverges easily with lr=0.5; diverges occasionally with lr=0.2
     f_values = []
     t0 = time.time()
@@ -77,7 +76,7 @@ for mc_trial in range(100):
 
         def closure():
             opt.zero_grad()
-            f_value = f(*xyz) + 2 ** (-23) * sum([torch.sum(0.5 * p * p) for p in xyz])
+            f_value = f(*xyz) + 2 ** (-23) * sum([torch.sum(p * p) for p in xyz])
             f_value.backward()
             return f_value
 
@@ -94,7 +93,7 @@ for mc_trial in range(100):
     """
     xyz = copy.deepcopy(xyz0)
     [w.requires_grad_(True) for w in xyz]
-    opt = psgd.XMat( # set preconditioner_init_scale to None 
+    opt = psgd.XMat(
         xyz, preconditioner_init_scale=None, lr_params=0.2, lr_preconditioner=0.1
     )
 
@@ -103,9 +102,7 @@ for mc_trial in range(100):
     for _ in range(num_iterations):
 
         def closure():
-            return f(*xyz) + 2 ** (-23) * sum(
-                [torch.sum(torch.rand_like(p) * p * p) for p in opt._params_with_grad]
-            )
+            return f(*xyz) + 2 ** (-23) * sum([torch.sum(p * p) for p in xyz])
 
         f_values.append(opt.step(closure).item())
     total_time = time.time() - t0
@@ -116,7 +113,7 @@ for mc_trial in range(100):
     )
 
     """
-    Newton method (Only for problems with roughly 10K or less params, also it needs a lot of steps to fit the Hessian.)
+    Newton method (Only for problems with roughly 100K or less params, also it needs a lot of steps to fit the Hessian.)
     """
     xyz = copy.deepcopy(xyz0)
     [w.requires_grad_(True) for w in xyz]
@@ -129,9 +126,7 @@ for mc_trial in range(100):
     for _ in range(num_iterations):
 
         def closure():
-            return f(*xyz) + 2 ** (-23) * sum(
-                [torch.sum(torch.rand_like(p) * p * p) for p in opt._params_with_grad]
-            )
+            return f(*xyz) + 2 ** (-23) * sum([torch.sum(p * p) for p in xyz])
 
         f_values.append(opt.step(closure).item())
     total_time = time.time() - t0
@@ -155,9 +150,7 @@ for mc_trial in range(100):
     for _ in range(num_iterations):
 
         def closure():
-            return f(*xyz) + 2 ** (-23) * sum(
-                [torch.sum(torch.rand_like(p) * p * p) for p in opt._params_with_grad]
-            )
+            return f(*xyz) + 2 ** (-23) * sum([torch.sum(p * p) for p in xyz])
 
         f_values.append(opt.step(closure).item())
     total_time = time.time() - t0
@@ -181,9 +174,7 @@ for mc_trial in range(100):
     for _ in range(num_iterations):
 
         def closure():
-            return f(*xyz) + 2 ** (-23) * sum(
-                [torch.sum(torch.rand_like(p) * p * p) for p in opt._params_with_grad]
-            )
+            return f(*xyz) + 2 ** (-23) * sum([torch.sum(p * p) for p in xyz])
 
         f_values.append(opt.step(closure).item())
     total_time = time.time() - t0
@@ -195,6 +186,7 @@ for mc_trial in range(100):
 
     ax1.set_xlabel("Iterations")
     ax1.set_ylabel("Fitting loss")
+    ax1.tick_params(labelsize=7)
     ax1.legend(
         [
             "Gradient descent",
@@ -209,7 +201,8 @@ for mc_trial in range(100):
     ax1.set_title("Tensor rank decomposition benchmark", loc="left")
 
     ax2.set_xlabel("Wall time (s)")
-    ax2.set_ylabel("Fitting loss")
+    ax2.tick_params(labelsize=7)
+    # ax2.set_ylabel("Fitting loss")
     ax2.legend(
         [
             "Gradient descent",
@@ -224,7 +217,6 @@ for mc_trial in range(100):
 
     plt.savefig(f"psgd_vs_bfgs_trial{mc_trial}.svg")
     plt.show()
-
 
 
 # """
