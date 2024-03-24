@@ -8,7 +8,7 @@ import preconditioned_stochastic_gradient_descent as psgd
 
 # torch.set_default_device("cuda:0")
 
-plt.figure(figsize=[9, 4])
+plt.figure(figsize=[7, 3])
 ax1 = plt.subplot(131)
 ax2 = plt.subplot(132)
 ax3 = plt.subplot(133)
@@ -31,7 +31,7 @@ for count, eps in enumerate([0, 1e-2]):
         num_iterations = 150000
     else:
         ax = ax2
-        num_iterations = 50000
+        num_iterations = 150000
 
     if eps == 0:
         H1 = H.clone()
@@ -44,41 +44,47 @@ for count, eps in enumerate([0, 1e-2]):
     if eps == 0:
         step = 1.0
     else:
-        step = 0.2
+        step = 0.1
     Loss = []
     for i in range(num_iterations):
+        loss = torch.linalg.matrix_norm(Q.t() @ Q @ H1 - I)
+        Loss.append(loss.item())
+        
         v = torch.randn(N, 1)
         h = H @ v + eps * torch.randn(N, 1)
 
         psgd.update_precond_newton_math_(Q, invQ, v, h, step, "2nd", 0.0)
 
-        loss = torch.linalg.matrix_norm(Q.t() @ Q @ H1 - I)
-        Loss.append(loss.item())
-
-    ax.semilogy(Loss, "k")
+    ax.semilogy(range(1, 1 + num_iterations), Loss, "k")
     
     # fitting on Lie group
     Q, invQ = torch.eye(N), None
     if eps == 0:
         step = 1.0
     else:
-        step = 0.2
+        step = 0.1
     Loss = []
     for i in range(num_iterations):
+        loss = torch.linalg.matrix_norm(Q.t() @ Q @ H1 - I)
+        Loss.append(loss.item())
+        
         v = torch.randn(N, 1)
         h = H @ v + eps * torch.randn(N, 1)
 
         psgd.update_precond_newton_math_(Q, invQ, v, h, step, "2nd", 0.0)
 
-        loss = torch.linalg.matrix_norm(Q.t() @ Q @ H1 - I)
-        Loss.append(loss.item())
-
-    ax.semilogy(Loss, "b")
+    ax.semilogy(range(1, 1 + num_iterations), Loss, "b")
 
     # closed-form solution
     Loss = []
     hh = torch.eye(N)
     for i in range(num_iterations):
+        L, U = torch.linalg.eigh(hh)
+        # L[L < 1e-6] = 1e-6
+        P = U @ torch.diag(torch.rsqrt(L)) @ U.t()
+        loss = torch.linalg.matrix_norm(P @ H1 - I)
+        Loss.append(loss.item())
+        
         v = torch.randn(N, 1)
         h = H @ v + eps * torch.randn(N, 1)
 
@@ -87,18 +93,15 @@ for count, eps in enumerate([0, 1e-2]):
         else:
             hh = 0.999 * hh + 0.001 * (h @ h.t())
 
-        L, U = torch.linalg.eigh(hh)
-        # L[L < 1e-6] = 1e-6
-        P = U @ torch.diag(torch.rsqrt(L)) @ U.t()
-        loss = torch.linalg.matrix_norm(P @ H1 - I)
-        Loss.append(loss.item())
-
-    ax.semilogy(Loss, "r")
+    ax.semilogy(range(1, 1 + num_iterations), Loss, "r")
 
     # bfgs
     Loss = []
     P = torch.eye(N)
     for i in range(num_iterations):
+        loss = torch.linalg.matrix_norm(P @ H1 - I)
+        Loss.append(loss.item())
+        
         v = torch.randn(N, 1)
         h = H @ v + eps * torch.randn(N, 1)
         if v.t() @ h < 0:
@@ -109,15 +112,13 @@ for count, eps in enumerate([0, 1e-2]):
             + (v.t() @ h + h.t() @ P @ h) * (v @ v.t()) / (h.t() @ v) ** 2
             - (P @ h @ v.t() + v @ h.t() @ P) / (v.t() @ h)
         )
-        loss = torch.linalg.matrix_norm(P @ H1 - I)
-        Loss.append(loss.item())
 
-    ax.semilogy(Loss, "m")
+    ax.semilogy(range(1, 1 + num_iterations), Loss, "m")
 
     ax.legend(
         [
-            r"PSGD, GL(n,R)",
-            r"PSGD, Tri",
+            r"PSGD, GL$(n,\mathbb{R})$",
+            r"PSGD, Triangular",
             r"$P=(E[hh^T])^{-0.5}$",
             "BFGS",
         ],
@@ -142,6 +143,9 @@ Q, invQ = torch.eye(N), torch.eye(N)
 H = torch.ones(N, N) / 4
 Loss = []
 for i in range(num_iterations):
+    loss = torch.linalg.matrix_norm(Q.t() @ Q @ H - I)
+    Loss.append(loss.item())
+    
     u = torch.rand(N, 1)
     H = H + u @ u.t()
     v = torch.randn(N, 1)
@@ -149,16 +153,16 @@ for i in range(num_iterations):
 
     psgd.update_precond_newton_math_(Q, invQ, v, h, 1.0, "2nd", 0.0)
 
-    loss = torch.linalg.matrix_norm(Q.t() @ Q @ H - I)
-    Loss.append(loss.item())
-
-ax.loglog(Loss, "k")
+ax.loglog(range(1, 1 + num_iterations), Loss, "k")
 
 # fitting on Lie group, fixed step size 1
 Q, invQ = torch.eye(N), None
 H = torch.ones(N, N) / 4
 Loss = []
 for i in range(num_iterations):
+    loss = torch.linalg.matrix_norm(Q.t() @ Q @ H - I)
+    Loss.append(loss.item())
+    
     u = torch.rand(N, 1)
     H = H + u @ u.t()
     v = torch.randn(N, 1)
@@ -166,16 +170,19 @@ for i in range(num_iterations):
 
     psgd.update_precond_newton_math_(Q, invQ, v, h, 1.0, "2nd", 0.0)
 
-    loss = torch.linalg.matrix_norm(Q.t() @ Q @ H - I)
-    Loss.append(loss.item())
-
-ax.loglog(Loss, "b")
+ax.loglog(range(1, 1 + num_iterations), Loss, "b")
 
 # closed-form solution
 Loss = []
 hh = torch.eye(N)
 H = torch.ones(N, N) / 4
 for i in range(num_iterations):
+    L, U = torch.linalg.eigh(hh)
+    # L[L < 1e-6] = 1e-6
+    P = U @ torch.diag(torch.rsqrt(L)) @ U.t()
+    loss = torch.linalg.matrix_norm(P @ H - I)
+    Loss.append(loss.item())
+    
     u = torch.rand(N, 1)
     H = H + u @ u.t()
     v = torch.randn(N, 1)
@@ -186,19 +193,16 @@ for i in range(num_iterations):
     else:
         hh = 0.999 * hh + 0.001 * (h @ h.t())
 
-    L, U = torch.linalg.eigh(hh)
-    # L[L < 1e-6] = 1e-6
-    P = U @ torch.diag(torch.rsqrt(L)) @ U.t()
-    loss = torch.linalg.matrix_norm(P @ H - I)
-    Loss.append(loss.item())
-
-ax.loglog(Loss, "r")
+ax.loglog(range(1, 1 + num_iterations), Loss, "r")
 
 # bfgs
 Loss = []
 P = torch.eye(N)
 H = torch.ones(N, N) / 4
 for i in range(num_iterations):
+    loss = torch.linalg.matrix_norm(P @ H - I)
+    Loss.append(loss.item())
+    
     u = torch.rand(N, 1)
     H = H + u @ u.t()
     v = torch.randn(N, 1)
@@ -211,15 +215,13 @@ for i in range(num_iterations):
         + (v.t() @ h + h.t() @ P @ h) * (v @ v.t()) / (h.t() @ v) ** 2
         - (P @ h @ v.t() + v @ h.t() @ P) / (v.t() @ h)
     )
-    loss = torch.linalg.matrix_norm(P @ H - I)
-    Loss.append(loss.item())
 
-ax.loglog(Loss, "m")
+ax.loglog(range(1, 1 + num_iterations), Loss, "m")
 
 ax.legend(
     [
-        r"PSGD, GL(n,R)",
-        r"PSGD, Tri",
+        r"PSGD, GL$(n,\mathbb{R})$",
+        r"PSGD, Triangular",
         r"$P=(E[hh^T])^{-0.5}$",
         "BFGS",
     ],
