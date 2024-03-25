@@ -1,41 +1,43 @@
 ## Pytorch implementation of PSGD 
 *Major recent updates*: added gradient whitening preconditioners to all classes; wrapped affine preconditioners as a class (also support complex matrices); preconditioner fitting step size normalization with the 2nd derivative info.
 ### An overview
-PSGD (Preconditioned SGD) is a general purpose (mathematical or stochastic, convex or nonconvex) 2nd order optimizer. Unlike many 2nd order optimizers, PSGD does not rely on damping terms to stabilize it.    
+PSGD (Preconditioned SGD) is a general purpose (mathematical and stochastic, convex and nonconvex) 2nd order optimizer. Unlike many 2nd order optimizers, PSGD does not rely on damping terms to stabilize it.    
 
-Notations: $H$ the Hessian; ${v\sim\mathcal{N}(0,I)}$; $h=Hv$ the Hessian-vector product; $g$ the gradient; $P=Q^TQ$ the preconditioner.
+Notations: $E_z[\ell(\theta, z)]$ the loss; $H$ the Hessian;  $h=Hv$ the Hessian-vector product with ${v\sim\mathcal{N}(0,I)}$; $g$ the gradient; $P=Q^TQ$ the preconditioner; $[I+A]_R\approx I + {\rm triu}(A) + {\rm triu}(A,1)$ for $\|\|A\|\| < 1$, where $[\cdot]_R$ keeps $R$ of a QR decomposition.
 
-#### Table I: Variations of preconditioner fitting loss
+#### Table I: Variations of preconditioner fitting criterion
   
-| Fitting loss of $P$ | Solution | Notes |
+| Criterion | Solution | Notes |
 |--------------|------------------|-------|
 |$h^TPh + v^TP^{-1}v$ | $Phh^TP = vv^T$ | Reduces to secant equation $Ph=v$ when  $v^Th>0$ (Quasi-Newton methods, e.g., BFGS); set preconditioner_type="Newton" for this implementation.   | 
 | $E_v[h^TPh + v^TP^{-1}v]$ | $P^{-2}=H^2$ | Reduces to Newton's method when  $H\succ 0$; set preconditioner_type="Newton" for this implementation.  | 
-| $E_v[g^TPg + v^TP^{-1}v]$ | $P^{-2}=E[gg^T]$ | $P^{-2}$ reduces to Fisher information matrix with sample-wise gradient $g$ (Gauss-Newton and natural gradient family, e.g., KFAC); *no class implementation for now*.  | 
+| $E_{v,z}[g^TPg + v^TP^{-1}v]$ | $P^{-2}=E_z[gg^T]$ | $P^{-2}$ reduces to Fisher information matrix with sample-wise gradient $g$ (Gauss-Newton and natural gradient family, e.g., KFAC); *no class implementation for now*.  | 
 | $\sum_t E_{v_t}[g_t^TPg_t + v_t^TP^{-1}v_t]$ | $P^{-2}=\sum_t g_t g_t^T$ | Reduces to AdaGrad family, e.g., Adam(W), RMSProp, Shampoo, $\ldots$; set preconditioner_type="whitening" for this implementation.  | 
 
-#### Table II: Implemented preconditioners on Lie groups 
+#### Table II: Implemented Lie groups preconditioners with storage and computation numbers for $\theta={\rm vec}(\Theta)$ and $\Theta\in\mathbb{R}^{m\times m}$ 
 
-|Lie Group|Update of $Q$ ($0<\mu\le 1$) |Notes|
-|-------------------|-----|-----|
-| ${\rm GL}(n, \mathbb{R})$  | $Q\leftarrow \left( I - \mu \frac{Qhh^TQ^T - Q^{-T}vv^TQ^{-1}}{ \|\|Qh\|\|^2 + \|\| Q^{-T}v\|\|^2  } \right)   Q$ | See class *Newton*; set keep_invQ=True to calculate $Q^{-1}$ recursively via Woodbury formula.   |
-| Triangular matrices | $Q\leftarrow \left[ I - \mu \frac{Qhh^TQ^T - Q^{-T}vv^TQ^{-1}}{ \|\|Qh\|\|^2 + \|\| Q^{-T}v\|\|^2  } \right]_R   Q$ | See class *Newton*; set keep_invQ=False to make $Q$ triangular and calculate $Q^{-T}v$ with backward substitution; $[\cdot]_R$ only keeps $R$ of a QR decomposition and $[I+A]_R\approx I + {\rm triu}(A) + {\rm triu}(A,1)$ for $\|\|A\|\| \ll 1$.     |
-| Diagonal matrices | $Q\leftarrow \left( I - \mu \frac{(Qh)^2 - (v/Q)^2}{  \max\left((Qh)^2 + (v/Q)^2\right)} \right)   Q$ | $Q$ is a vector; see class either *LRA* with rank_of_approximation=0 or *XMat* for implementations.  |
-| $Q=\oplus_i(\otimes_j Q_{i,j})$, e.g., $Q=Q_2\otimes Q_1$ | $A=Q_1 hQ_2^H$, $B=Q_2^{-H}v^H Q_1^{-1}$, $Q_1\leftarrow \left[ I - \mu \frac{AA^H-B^HB}{\|\|AA^H+B^HB\|\|_F} \right]_R   Q_1$, $Q_2\leftarrow \left[ I - \mu \frac{A^HA-BB^H}{\|\|A^HA+BB^H\|\|_F} \right]_R   Q_2$ | Both $v$ and $h$ are matrices; see class *Affine* for implementations (also support complex matrices and diagonal matrices by setting preconditioner_max_size=0).  | 
-| $Q=(I+UV^T){\rm diag}(d)$ | $a=Qh$, $b=Q^{-T}v$, $d\leftarrow \left(1 - \mu\frac{(Q^Ta)h-v(Q^{-1}b)}{\sqrt{\left((Q^Ta)^2 + v^2\right)\left(h^2 + (Q^{-1}b)^2\right)}}\right)d$, $U\leftarrow U - \mu\frac{(aa^T-bb^T)V(I+V^TU)}{\|\|a\|\| \\, \|\|VV^Ta \|\| + \|\|b\|\|\\, \|\|VV^Tb\|\|}$, $V\leftarrow V - \mu\frac{ (I+VU^T)(aa^T-bb^T)U }{\|\|a\|\| \\, \|\|UU^Ta\|\| + \|\|b\|\| \\, \|\|UU^Tb\|\|}$ | See class *LRA* for implementations; typically $0\le r\ll n$ with $U, V \in \mathbb{R}^{n\times r}$. Recommend to update either $U$ or $V$, not both, per step.  |    
+|Lie Group|Update of $Q$  |Storages | Computations |Notes|
+|---|---|---|---|---|
+| ${\rm GL}(n, \mathbb{R})$  | $Q\leftarrow \left( I - \mu \frac{Qhh^TQ^T - Q^{-T}vv^TQ^{-1}}{ \|\|Qh\|\|^2 + \|\| Q^{-T}v\|\|^2  } \right)   Q$ | $\mathcal{O}(m^4)$ | $\mathcal{O}(m^4)$ | See class *Newton*; set keep_invQ=True to calculate $Q^{-1}$ recursively via Woodbury formula.   |
+| Triangular matrices | $Q\leftarrow \left[ I - \mu \frac{Qhh^TQ^T - Q^{-T}vv^TQ^{-1}}{ \|\|Qh\|\|^2 + \|\| Q^{-T}v\|\|^2  } \right]_R   Q$ | $\mathcal{O}(m^4)$ | $\mathcal{O}(m^6)$ | See class *Newton*; set keep_invQ=False to make $Q$ triangular and calculate $Q^{-T}v$ with backward substitution.     |
+| Diagonal matrices, $Q={\rm diag}(q)$ | $q\leftarrow \left( I - \mu \frac{(qh)^2 - (v/q)^2}{  \max\left((qh)^2 + (v/q)^2\right)} \right)   q$ | $\mathcal{O}(m^2)$ | $\mathcal{O}(m^2)$ | See class either *LRA* with rank_of_approximation=0 or *XMat* for implementations.  |
+| $Q=\oplus_i(\otimes_j Q_{i,j})$, e.g., $Q=Q_2\otimes Q_1$ | $A=Q_1 {\rm uvec}(h) Q_2^H$, $B=Q_2^{-H} [{\rm uvec}(v)]^H Q_1^{-1}$, $Q_1\leftarrow \left[ I - \mu \frac{AA^H-B^HB}{\|\|A\|\|_F^2 +\|\|B\|\|_F^2} \right]_R   Q_1$, $Q_2\leftarrow \left[ I - \mu \frac{A^HA-BB^H}{\|\|A\|\|_F^2 +\|\|B\|\|_F^2} \right]_R   Q_2$ | $\mathcal{O}(m^2)$ | $\mathcal{O}(m^3)$ | See class *Affine* for implementations (also support complex matrices and diagonal matrices by setting preconditioner_max_size=0).  | 
+| $Q=(I+UV^T){\rm diag}(d)$ | $a=Qh$, $b=Q^{-T}v$, $d\leftarrow \left(1 - \mu\frac{(Q^Ta)h-v(Q^{-1}b)}{\max\sqrt{\left((Q^Ta)^2 + v^2\right)\left(h^2 + (Q^{-1}b)^2\right)}}\right)d$, $U\leftarrow U - \mu\frac{(aa^T-bb^T)V(I+V^TU)}{\|\|a\|\| \\, \|\|VV^Ta \|\| + \|\|b\|\|\\, \|\|VV^Tb\|\|}$, $V\leftarrow V - \mu\frac{ (I+VU^T)(aa^T-bb^T)U }{\|\|a\|\| \\, \|\|UU^Ta\|\| + \|\|b\|\| \\, \|\|UU^Tb\|\|}$ | $\mathcal{O}(rm^2)$ | $\mathcal{O}(rm^2)$ | See class *LRA* for implementations; typically $0\le r\ll n$ with $U, V \in \mathbb{R}^{n\times r}$. Recommend to update either $U$ or $V$, not both, per step.  |  
+| Scaling-and-normalization | *no class implementation for now* | $\mathcal{O}(m)$ | $\mathcal{O}(m)$ | Hard to make it a universal black-box preconditioner. | 
 
+For AdaGrad like preconditioner, we simply replace pair $(v, h)$ with $(v, g)$. 
 #### Preconditioner fitting accuracy   
 
 [This script](https://github.com/lixilinx/psgd_torch/blob/master/misc/psgd_numerical_stability.py) generates the following plot showing the typical behaviors of different preconditioner fitting methods. 
 
 * With a static and noise-free Hessian-vector product model, both BFGS and PSGD converge linearly to the optimal preconditioner while closed-form solution $P=\left(E[hh^T]\right)^{-0.5}$ only converges sublinearly with rate $\mathcal{O}(1/t)$.
-* With a static additive noisy Hessian-vector model $h=Hv+\epsilon$, BFGS diverges easily, and PSGD may need a proper scheduler for $\mu$ (what shown here is with a constant $\mu$) to match the initial convergence speed of closed-form solution $P=\left(E[hh^T]\right)^{-0.5}$.
-* With a time-varying Hessian $H_{t+1}=H_t + uu^T$ and $u\sim\mathcal{U}(0,1)$, PSGD locks onto good preconditioner estimations faster than BFGS. The closed-form solution $P=\left(E[hh^T]\right)^{-0.5}$ is not good at tracking due to its sublinear convergence.       
+* With a static additive noisy Hessian-vector model $h=Hv+\epsilon$, BFGS diverges easily. With a constant step size $\mu$, the steady-state misadjustments of PSGD is proportional  to $\mu$. 
+* With a time-varying Hessian $H_{t+1}=H_t + uu^T$ and $u\sim\mathcal{U}(0,1)$, PSGD locks onto good preconditioner estimations quicker than BFGS, also no divergence before convergence. The closed-form solution $P=\left(E[hh^T]\right)^{-0.5}$ is not good at tracking due to its sublinear convergence.       
 
 <img src="https://github.com/lixilinx/psgd_torch/blob/master/misc/psgd_numerical_stability.svg" width=90% height=90%>
 
 #### Implementation details 
-The methods in Table 1 and preconditioners in Table 2 are wrapped into classes *XMat*, *LRA* (or *UVd*), *Newton* and *Affine* for easy use. The affine family are not black box preconditioners, and the users need to either group the gradients into matrices or reform the models such that the parameters are a list of matrices, e.g., [this demo](https://github.com/lixilinx/psgd_torch/blob/master/misc/affine_wrapping_F_conv2d.py) on wrapping torch.nn.functional.conv2d as an affine Conv2d class, and [this one](https://github.com/lixilinx/psgd_torch/blob/master/misc/affine_wrapping_VF_rnn_tanh.py) on wrapping torch._VF.rnn_tanh as an affine RNN class. Three main differences from torch.optim.SGD: 
+Optimizers with the criteria in Table 1 and preconditioner forms in Table 2 are wrapped into classes *XMat*, *LRA* (or *UVd*), *Newton* and *Affine* for easy use. The affine family are not black box preconditioners, and the users need to either group the gradients into matrices or reform the models such that the parameters are a list of matrices, e.g., [this demo](https://github.com/lixilinx/psgd_torch/blob/master/misc/affine_wrapping_F_conv2d.py) on wrapping torch.nn.functional.conv2d as an affine Conv2d class, and [this one](https://github.com/lixilinx/psgd_torch/blob/master/misc/affine_wrapping_VF_rnn_tanh.py) on wrapping torch._VF.rnn_tanh as an affine RNN class. Three main differences from torch.optim.SGD: 
 1) The loss to be minimized is passed through as a closure to the optimizer to support more complicated behaviors, notably, Hessian-vector product approximation with finite difference method when the 2nd order derivatives are not available.   
 2) Momentum here is the moving average of gradient so that its setting is decoupled from the learning rate, which is always normalized in PSGD. 
 3) As any other regularizations, (coupled) weight decay should be explicitly realized by adding $L2$ regularization to the loss. Similarly, decoupled weight decay is not included inside the PSGD implementations.
@@ -54,14 +56,16 @@ The methods in Table 1 and preconditioners in Table 2 are wrapped into classes *
 
 [Preconditioner fitting on Lie groups](https://github.com/lixilinx/psgd_torch/blob/master/misc/preconditioner_fitting_rule_verification.py): see how multiplicative updates work on Lie groups for different types of preconditioners: ${\rm GL}(n, \mathbb{R})$, LRA and Affine with $Q=Q_2\otimes Q_1$. 
 
-[Preconditioner estimation efficiency and numerical stability](https://github.com/lixilinx/psgd_torch/blob/master/misc/psgd_numerical_stability.py): a playground to compare PSGD with BFGS and closed-form solution $P=\left(E[hh^T]\right)^{-0.5}$. Eigenvalue decompositions required by the closed-form solution can be unstable with single precisions, while PSGD is free of numerically problematic operations like matrix inverse, eigenvalue decompositions, etc.
+[Preconditioner estimation efficiency and numerical stability](https://github.com/lixilinx/psgd_torch/blob/master/misc/psgd_numerical_stability.py): a playground to compare PSGD with BFGS and closed-form solution $P=\left(E[hh^T]\right)^{-0.5}$. Eigenvalue decompositions required by the closed-form solution can be numerically unstable with single precisions, while PSGD is free of any numerically problematic operations like large matrix inverse, eigenvalue decompositions, etc.
 
 [How PSGD generalizes so well](https://github.com/lixilinx/psgd_torch/blob/master/misc/how_psgd_generalize.py): This one serves as a good toy example illustrating it in the view of information theory. Starting from the same initial guesses, PSGD tends to find minima with smaller train cross entropy and flatter Hessians than Adam, i.e., shorter description lengths (DL) for train image-label pairs and model parameters. Similarly, [this example](https://github.com/lixilinx/psgd_torch/blob/master/misc/affine_wrapping_F_conv2d.py) shows that PSGD also generalizes better than Shampoo. 
+
+[PSGD vs approximated closed-form solutions](https://github.com/lixilinx/psgd_torch/blob/master/misc/psgd_shampoo_caspr.py): This example shows that most approximated closed-form solutions, e.g., KFAC, Shampoo, CASPR to name a few, are pretty rough in terms of accuracy, although they do work in certain circumstances.  
 
 ### Resources
 1) Preconditioned stochastic gradient descent, [arXiv:1512.04202](https://arxiv.org/abs/1512.04202), 2015. (General ideas of PSGD, preconditioner fitting losses and Kronecker product preconditioners.)
 2) Preconditioner on matrix Lie group for SGD, [arXiv:1809.10232](https://arxiv.org/abs/1809.10232), 2018. (Focus on preconditioners with the affine Lie group.)
 3) Black box Lie group preconditioners for SGD, [arXiv:2211.04422](https://arxiv.org/abs/2211.04422), 2022. (Mainly about the LRA preconditioner. I also have prepared [these supplementary materials](https://drive.google.com/file/d/1CTNx1q67_py87jn-0OI-vSLcsM1K7VsM/view) for detailed math derivations.)
-4) Stochastic Hessian fitting on Lie group, [arXiv:2402.11858](https://arxiv.org/abs/2402.11858). (Some ongoing theoretical works leading to the recent updates. The Hessian fitting is shown to be strongly convex on group ${\rm GL}(n, \mathbb{R})/R_{\rm polar}$.)
+4) Stochastic Hessian fitting on Lie group, [arXiv:2402.11858](https://arxiv.org/abs/2402.11858), 2024. (Some theoretical works on the efficiency of PSGD. The Hessian fitting problem is shown to be strongly convex on group ${\rm GL}(n, \mathbb{R})/R_{\rm polar}$.)
 5) Curvature-informed SGD via general purpose Lie-group preconditioners, [arXiv:2402.04553](https://arxiv.org/abs/2402.04553), 2024. (Plenty of benchmark results and analyses for PSGD vs. other optimizers.)
 6) Other implementations: [Tensorflow 1.x](https://github.com/lixilinx/psgd_tf/releases/tag/1.3) and [TensorFlow 2.x](https://github.com/lixilinx/psgd_tf). I no longer maintain them as I have not used Tensorflow for some time.
