@@ -23,7 +23,7 @@ Notations: $E_z[\ell(\theta, z)]$ the loss; $H$ the Hessian;  $h=Hv$ the Hessian
 | Diagonal matrices, $Q={\rm diag}(q)$ | $q\leftarrow \left( I - \mu \frac{(qh)^2 - (v/q)^2}{  \max\left((qh)^2 + (v/q)^2\right)} \right)   q$ | $\mathcal{O}(m^2)$ | $\mathcal{O}(m^2)$ | See class either *LRA* with rank_of_approximation=0 or *XMat* for implementations.  |
 | $Q=\oplus_i(\otimes_j Q_{i,j})$, e.g., $Q=Q_2\otimes Q_1$ | $A=Q_1 {\rm uvec}(h) Q_2^H$, $B=Q_2^{-H} [{\rm uvec}(v)]^H Q_1^{-1}$, $Q_1\leftarrow \left[ I - \mu \frac{AA^H-B^HB}{\|\|A\|\|_F^2 +\|\|B\|\|_F^2} \right]_R   Q_1$, $Q_2\leftarrow \left[ I - \mu \frac{A^HA-BB^H}{\|\|A\|\|_F^2 +\|\|B\|\|_F^2} \right]_R   Q_2$ | $\mathcal{O}(m^2)$ | $\mathcal{O}(m^3)$ | See class *Affine* for implementations (also support complex matrices and diagonal matrices by setting preconditioner_max_size=0).  | 
 | $Q=(I+UV^T){\rm diag}(d)$ | $a=Qh$, $b=Q^{-T}v$, $d\leftarrow \left(1 - \mu\frac{(Q^Ta)h-v(Q^{-1}b)}{\max\sqrt{\left((Q^Ta)^2 + v^2\right)\left(h^2 + (Q^{-1}b)^2\right)}}\right)d$, $U\leftarrow U - \mu\frac{(aa^T-bb^T)V(I+V^TU)}{\|\|a\|\| \\, \|\|VV^Ta \|\| + \|\|b\|\|\\, \|\|VV^Tb\|\|}$, $V\leftarrow V - \mu\frac{ (I+VU^T)(aa^T-bb^T)U }{\|\|a\|\| \\, \|\|UU^Ta\|\| + \|\|b\|\| \\, \|\|UU^Tb\|\|}$ | $\mathcal{O}(rm^2)$ | $\mathcal{O}(rm^2)$ | See class *LRA* for implementations; typically $0\le r\ll n$ with $U, V \in \mathbb{R}^{n\times r}$. Recommend to update either $U$ or $V$, not both, per step.  |  
-| Scaling-and-normalization | *no class implementation for now* | $\mathcal{O}(m)$ | $\mathcal{O}(m)$ | Hard to make it a universal black-box preconditioner. | 
+| Scaling-and-normalization | *no class implementation for now* | $\mathcal{O}(m)$ | $\mathcal{O}(m^2)$ | Hard to make it a universal black-box preconditioner. | 
 
 For AdaGrad like preconditioner, we simply replace pair $(v, h)$ with $(v, g)$. 
 #### Preconditioner fitting accuracy   
@@ -31,7 +31,7 @@ For AdaGrad like preconditioner, we simply replace pair $(v, h)$ with $(v, g)$.
 [This script](https://github.com/lixilinx/psgd_torch/blob/master/misc/psgd_numerical_stability.py) generates the following plot showing the typical behaviors of different preconditioner fitting methods. 
 
 * With a static and noise-free Hessian-vector product model, both BFGS and PSGD converge linearly to the optimal preconditioner while closed-form solution $P=\left(E[hh^T]\right)^{-0.5}$ only converges sublinearly with rate $\mathcal{O}(1/t)$.
-* With a static additive noisy Hessian-vector model $h=Hv+\epsilon$, BFGS diverges easily. With a constant step size $\mu$, the steady-state misadjustments of PSGD is proportional  to $\mu$. 
+* With a static additive noisy Hessian-vector model $h=Hv+\epsilon$, BFGS diverges easily. With a constant step size $\mu$, the steady-state fitting errors of PSGD are proportional  to $\mu$. 
 * With a time-varying Hessian $H_{t+1}=H_t + uu^T$ and $u\sim\mathcal{U}(0,1)$, PSGD locks onto good preconditioner estimations quicker than BFGS, also no divergence before convergence. The closed-form solution $P=\left(E[hh^T]\right)^{-0.5}$ is not good at tracking due to its sublinear convergence.       
 
 <img src="https://github.com/lixilinx/psgd_torch/blob/master/misc/psgd_numerical_stability.svg" width=90% height=90%>
@@ -66,6 +66,6 @@ Optimizers with the criteria in Table 1 and preconditioner forms in Table 2 are 
 1) Preconditioned stochastic gradient descent, [arXiv:1512.04202](https://arxiv.org/abs/1512.04202), 2015. (General ideas of PSGD, preconditioner fitting losses and Kronecker product preconditioners.)
 2) Preconditioner on matrix Lie group for SGD, [arXiv:1809.10232](https://arxiv.org/abs/1809.10232), 2018. (Focus on preconditioners with the affine Lie group.)
 3) Black box Lie group preconditioners for SGD, [arXiv:2211.04422](https://arxiv.org/abs/2211.04422), 2022. (Mainly about the LRA preconditioner. I also have prepared [these supplementary materials](https://drive.google.com/file/d/1CTNx1q67_py87jn-0OI-vSLcsM1K7VsM/view) for detailed math derivations.)
-4) Stochastic Hessian fitting on Lie group, [arXiv:2402.11858](https://arxiv.org/abs/2402.11858), 2024. (Some theoretical works on the efficiency of PSGD. The Hessian fitting problem is shown to be strongly convex on group ${\rm GL}(n, \mathbb{R})/R_{\rm polar}$.)
+4) Stochastic Hessian fittings on Lie groups, [arXiv:2402.11858](https://arxiv.org/abs/2402.11858), 2024. (Some theoretical works on the efficiency of PSGD. The Hessian fitting problem is shown to be strongly convex on group ${\rm GL}(n, \mathbb{R})/R_{\rm polar}$.)
 5) Curvature-informed SGD via general purpose Lie-group preconditioners, [arXiv:2402.04553](https://arxiv.org/abs/2402.04553), 2024. (Plenty of benchmark results and analyses for PSGD vs. other optimizers.)
 6) Other implementations: [Tensorflow 1.x](https://github.com/lixilinx/psgd_tf/releases/tag/1.3) and [TensorFlow 2.x](https://github.com/lixilinx/psgd_tf). I no longer maintain them as I have not used Tensorflow for some time.
