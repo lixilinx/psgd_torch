@@ -1138,11 +1138,17 @@ def update_precond_newton_math_(Q, invQ, v, h, step, step_normalizer, tiny):
         # V = torch.cat([a, -b], 1).t() @ Q
         # Q.sub_(U@V)
         # woodbury_identity_(invQ, -U, V)
-        U = torch.cat([a,  b], 1)*mu
-        V = torch.cat([a, -b], 1).t()
-        I = torch.eye(2, dtype=U.dtype, device=U.device)
-        Q.sub_(U @ V @ Q)
-        invQ.add_((invQ @ U) @ torch.linalg.solve(I - V@U, V))
+        
+        # U = torch.cat([a,  b], 1)*mu
+        # V = torch.cat([a, -b], 1).t()
+        # I = torch.eye(2, dtype=U.dtype, device=U.device)
+        # Q.sub_(U @ V @ Q)
+        # invQ.add_((invQ @ U) @ torch.linalg.solve(I - V@U, V))
+
+        U = torch.cat([a, b], 1) * mu
+        V = torch.cat([-a.t() @ Q, v.t()], 0)
+        Q.add_(U @ V)
+        woodbury_identity_(invQ, U, V)    
     else:
         b = torch.linalg.solve_triangular(Q.t(), v, upper=False)
         # grad = torch.triu(a.mm(a.t()) - b.mm(b.t()))
