@@ -15,7 +15,7 @@ def Rosenbrock(x):
 """
 Create the optimizer.
 """
-opt = psgd.Newton(x, preconditioner_init_scale=None, lr_params=1.0, lr_preconditioner=1.0)
+opt = psgd.Newton(x, preconditioner_init_scale=None, lr_params=1.0, lr_preconditioner=0.5)
 # opt = psgd.Affine(x, preconditioner_init_scale=None, lr_params=1.0, lr_preconditioner=0.5)
 # opt = psgd.XMat(x, preconditioner_init_scale=None, lr_params=1.0, lr_preconditioner=0.2)
 # opt = psgd.LRA(x, preconditioner_init_scale=None, lr_params=1.0, lr_preconditioner=0.2)
