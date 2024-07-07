@@ -1356,15 +1356,98 @@ class Newton:
 # where Q1i and Q2i are triangular or diagonal matrices with positive diagonals (https://arxiv.org/pdf/1809.10232.pdf).  
 # 
 
-def initQ(size, dtype, device, max_size):
+
+def matrixizer(t):
     """
-    Initialize Q as an identity matrix if its size <= max_size;
-    otherwise a vector of ones. 
+    It returns triple (f, invf, matrix_shape) for tensor <=> matrix convertion such that
+        1) invf(f(t)) = t; 
+        2) matrix_shape = f(t).shape 
+        3) Preconditioner for matrix f(t) has the minimum size. 
+    
+    A few examples, 
+        1), f(t)=t.reshape([1, 1]) for t = torch.randn([])
+        2), f(t)=t.reshape([1, 10]) for t = torch.randn(10)
+        3), f(t)=t for t = torch.randn(2, 5)
+        4), f(t)=t.reshape(6, 5) for t = torch.randn(2,3,5)
+        5), f(t)=t.permute(0,1,3,2,4).reshape(42,55) for t = torch.randn(2,3,5,7,11)
     """
-    if size <= max_size:
-        return torch.eye(size, dtype=dtype, device=device)
+    def prod(arr):
+        # prod = lambda arr: 1 if len(arr)==0 else arr[0]*prod(arr[1:])
+        result = 1
+        for a in arr:
+            result *= a
+        return result 
+    
+    def permutations(p0):
+        # generate all the permutations of the original one p0 
+        if len(p0)==1:
+            yield p0
+        else:
+            for i in range(len(p0)):
+                for q in permutations(p0[:i] + p0[i+1:]):
+                    yield (p0[i], *q)
+    
+    # here begins the processing 
+    if t.dim() == 2: # t already is a matrix, do nothing  
+        return (lambda u: u, lambda v: v, t.shape)
+    elif t.dim() < 2: # scalar or vector, simple reshape to matrix  
+        mtx_shape = (1, t.numel())
+        return (lambda u, shape=mtx_shape: u.reshape(shape),
+                lambda v, shape=t.shape:   v.reshape(shape),
+                mtx_shape)
+    else: # higher order tensor, a little complicated  
+        p0, s0 = tuple(range(t.dim())), t.shape # original permutation and shape
+        min_precond_size, opt_p,opt_s,opt_i = float('inf'), None,None,None
+        for p in permutations(p0):
+            s = tuple(s0[j] for j in p)
+            for i in range(1, len(p)):  
+                if (new_size:=prod(s[:i])**2 + prod(s[i:])**2) < min_precond_size:
+                    min_precond_size = new_size
+                    opt_p, opt_s, opt_i = p, s, i
+            
+        if opt_p == p0: # no permutation is needed, just reshaping 
+            mtx_shape = (prod(s0[:opt_i]), prod(s0[opt_i:]))
+            return (lambda u, shape=mtx_shape: u.reshape(shape),
+                    lambda v, shape=s0:        v.reshape(shape),
+                    mtx_shape)
+        else: # need both permutation and reshaping 
+            mtx_shape = (prod(opt_s[:opt_i]), prod(opt_s[opt_i:]))
+            q = tuple(pair[1] for pair in sorted([(k,i) for (i,k) in enumerate(opt_p)]))
+            return (lambda u, permute=opt_p, shape=mtx_shape: u.permute(permute).reshape(shape),
+                    lambda v, permute=q,     shape=opt_s:     v.reshape(shape).permute(permute),
+                    mtx_shape)
+    
+    
+def initQ(p, f, scale, max_size, max_skew):
+    """
+    It initializes preconditioner Q = kron(Q2, Q1) for param p with matrixizer f to scale * I,
+    where Q1 or Q2 can reduce to diagonal matrices when either of the following conditions is met,
+        1) its size is 1 (no need to save as a matrix);
+        2) its size is larger than max_size;
+        3) Its relative size compared with the other Q is too large, e.g., size(Q2) > max_skew*size(Q1). 
+    """
+    s1, s2 = f[2] # f is the returned tuple from matrixizer for param p 
+    if s1<2 or s1>max_size or s1>max_skew*s2:
+        Q1 = scale**0.5 * torch.ones(s1, dtype=p.dtype, device=p.device) 
     else:
-        return torch.ones(size, dtype=dtype, device=device) 
+        Q1 = scale**0.5 * torch.eye(s1, dtype=p.dtype, device=p.device) 
+        
+    if s2<2 or s2>max_size or s2>max_skew*s1:
+        Q2 = scale**0.5 * torch.ones(s2, dtype=p.dtype, device=p.device) 
+    else:
+        Q2 = scale**0.5 * torch.eye(s2, dtype=p.dtype, device=p.device) 
+        
+    return [Q1, Q2]
+
+# def initQ(size, dtype, device, max_size):
+#     """
+#     Initialize Q as an identity matrix if its size <= max_size;
+#     otherwise a vector of ones. 
+#     """
+#     if size <= max_size:
+#         return torch.eye(size, dtype=dtype, device=device)
+#     else:
+#         return torch.ones(size, dtype=dtype, device=device) 
 
 #@torch.jit.script
 def update_precond_affine_math_(Ql, Qr, dX, dG, step, step_normalizer, tiny):
@@ -1495,8 +1578,9 @@ class Affine:
     Implements the affine group preconditioner, Q = sum_i kron(conj(Q2i), Q1i), as a class.
 
     Args for initialization:
-        params_with_grad: a list of real or complex matrix parameters requiring gradients;
-        preconditioner_max_size: Q2i or Q1i reduces to a diagonal matrix if its size is larger than this given maximum size, otherwise a triangular matrix; 
+        params_with_grad: a list of real or complex matrix or tensor parameters requiring gradients;
+        preconditioner_max_size: Q2i or Q1i reduces to a diagonal matrix if its size is larger than preconditioner_max_size, otherwise a triangular matrix;
+        preconditioner_max_skew: for example, Q2 reduces to a diagonal matrix if size(Q2)>preconditioner_max_skew*size(Q1), otherwise a triangular matrix;
         preconditioner_init_scale: initial scale of Q, i.e., Q = preconditioner_init_scale*eye(), with None for automatical setting;
         lr_params: normalized learning rate for parameters in range [0, 1];
         lr_preconditioner: normalized learning rate for preconditioner in range [0, 1];
@@ -1509,11 +1593,12 @@ class Affine:
         preconditioner_type: "Newton" or "whitening", see https://arxiv.org/abs/1809.10232 for the Newton and (empirical) Fisher types.  
 
     Notes:
-        Note 1: It is necessary to set a moderate preconditioner_max_size to put the memory consumption under control if 
-        certain parameters are too large, e.g., a word embedding matrix. 
-        All the preconditioner matrices are triangular matrices if preconditioner_max_size=inf, and diagonal matrices if preconditioner_max_size=0.
+        Note 1: All the preconditioner matrices are triangular matrices if preconditioner_max_size=preconditioner_max_skew=inf (max memory consumption), 
+        and diagonal matrices if either preconditioner_max_size or preconditioner_max_skew is zero (least memory consumption). 
+        We can control the memory consumption by setting preconditioner_max_size and preconditioner_max_skew properly.
         
-        Note 2: Affine preconditioners are not black box ones. It is the user's responsibility to reparameterize their model parameters as a list of matrices. 
+        Note 2: Affine preconditioners are not black box ones. It is the user's responsibility to reparameterize the model parameters as a list of matrices.
+        Otherwise, non-2D tensor parameters are reshaped to matrices as specified by the function matrixizer. 
             
         Note 3: The Hessian-vector product can be approximated using the finite difference method by setting 
         exact_hessian_vector_product = False when the 2nd derivatives is not available.
@@ -1528,9 +1613,9 @@ class Affine:
         Note 5: lr_params, lr_preconditioner, momentum, grad_clip_max_norm, preconditioner_update_probability, and 
         exact_hessian_vector_product (bool) all can be reset on the fly. 
         
-        Note 6: The affine transform matrices to be optimized can be of different data types (real or complex, single or double, etc.). 
+        Note 6: The matrices and tensor parameters to be optimized can be of different data types (real or complex, single or double, etc.). 
     """
-    def __init__(self,  params_with_grad, preconditioner_max_size=torch.inf, preconditioner_init_scale=None,
+    def __init__(self,  params_with_grad, preconditioner_max_size=torch.inf, preconditioner_max_skew=torch.inf, preconditioner_init_scale=None,
                         lr_params=0.01, lr_preconditioner=None, momentum=0.0,
                         grad_clip_max_norm=None, preconditioner_update_probability=1.0,
                         step_normalizer='2nd',
@@ -1551,20 +1636,25 @@ class Affine:
         self.step_normalizer = step_normalizer
         # protected members
         self._preconditioner_max_size = preconditioner_max_size
+        self._preconditioner_max_skew = preconditioner_max_skew
         params_with_grad = [params_with_grad,] if isinstance(params_with_grad, torch.Tensor) else params_with_grad
-        self._params_with_grad = [param for param in params_with_grad if param.requires_grad] # double check requires_grad flag
-        for p in self._params_with_grad:
-            if p.dim() != 2:
-                raise ValueError(f"expected 2D params (got {p.dim()}D param)")    
+        self._params_with_grad = [param for param in params_with_grad if param.requires_grad] # double check requires_grad flag 
         self._tiny = max([torch.finfo(p.dtype).tiny for p in self._params_with_grad])
         self._delta_param_scale = (max([torch.finfo(p.dtype).eps for p in self._params_with_grad])) ** 0.5
+        self._matrixizers = tuple(matrixizer(p) for p in self._params_with_grad)
         if preconditioner_init_scale is None:
             self._Qs = None # initialize on the fly 
         else:
-            self._Qs = [[preconditioner_init_scale**0.5 * initQ(p.shape[0], p.dtype, p.device, preconditioner_max_size), 
-                         preconditioner_init_scale**0.5 * initQ(p.shape[1], p.dtype, p.device, preconditioner_max_size)] for p in self._params_with_grad]
+            self._Qs = [initQ(p,f, preconditioner_init_scale, preconditioner_max_size, preconditioner_max_skew) for (f,p) in zip(self._matrixizers, self._params_with_grad)]
+            # self._Qs = [[preconditioner_init_scale**0.5 * initQ(p.shape[0], p.dtype, p.device, preconditioner_max_size), 
+            #              preconditioner_init_scale**0.5 * initQ(p.shape[1], p.dtype, p.device, preconditioner_max_size)] for p in self._params_with_grad]
         self._ms = None # momentum buffers 
         self._preconditioner_type = preconditioner_type
+        # echo matrixizer info 
+        for i, p in enumerate(self._params_with_grad):
+            if p.dim() != 2:
+                print(f"FYI: expect 2D params; got {p.dim()}D with shape {p.shape} for the {i}th param; will reshape to {self._matrixizers[i][2]}")
+                # raise ValueError(f"expect 2D params (got {p.dim()}D param)")   
 
     @torch.no_grad()
     def step(self, closure):
@@ -1604,10 +1694,12 @@ class Affine:
             # update preconditioner 
             # initialize Qs if it is None 
             if self._Qs is None:
-                self._Qs = [[(torch.sum(v*v.conj())/torch.sum(h*h.conj()))**0.25 * initQ(v.shape[0], v.dtype, v.device, self._preconditioner_max_size), 
-                                                                                   initQ(v.shape[1], v.dtype, v.device, self._preconditioner_max_size)] for (v, h) in zip(vs, Hvs)]
+                self._Qs = [initQ(v,f, (torch.sum(v*v.conj())/torch.sum(h*h.conj()))**0.25, self._preconditioner_max_size, self._preconditioner_max_skew) for (f,v,h) in zip(self._matrixizers, vs, Hvs)]
+                # self._Qs = [[(torch.sum(v*v.conj())/torch.sum(h*h.conj()))**0.25 * initQ(v.shape[0], v.dtype, v.device, self._preconditioner_max_size), 
+                #                                                                    initQ(v.shape[1], v.dtype, v.device, self._preconditioner_max_size)] for (v, h) in zip(vs, Hvs)]
             # update self._Qs
-            [update_precond_affine_math_(Qlr[0], Qlr[1], v, h, self.lr_preconditioner, self.step_normalizer, self._tiny) for (Qlr, v, h) in zip(self._Qs, vs, Hvs)]
+            [update_precond_affine_math_(Qlr[0], Qlr[1], f[0](v), f[0](h), self.lr_preconditioner, self.step_normalizer, self._tiny) for (Qlr, f,v,h) in zip(self._Qs, self._matrixizers, vs, Hvs)]
+            # [update_precond_affine_math_(Qlr[0], Qlr[1], v, h, self.lr_preconditioner, self.step_normalizer, self._tiny) for (Qlr, v, h) in zip(self._Qs, vs, Hvs)]
         else:
             # only evaluates the gradients
             with torch.enable_grad():
@@ -1619,10 +1711,12 @@ class Affine:
         # update preconditioner here if it is the whitening type 
         if (self._preconditioner_type!="Newton") and ((torch.rand([]) < self.preconditioner_update_probability) or (self._Qs is None)):
             if self._Qs is None:
-                self._Qs = [[(torch.numel(g)/torch.sum(g*g.conj()))**0.25 * initQ(g.shape[0], g.dtype, g.device, self._preconditioner_max_size), 
-                                                                            initQ(g.shape[1], g.dtype, g.device, self._preconditioner_max_size)] for g in grads]
+                self._Qs = [initQ(g,f, (torch.numel(g)/torch.sum(g*g.conj()))**0.25, self._preconditioner_max_size, self._preconditioner_max_skew) for (f,g) in zip(self._matrixizers, grads)]
+                # self._Qs = [[(torch.numel(g)/torch.sum(g*g.conj()))**0.25 * initQ(g.shape[0], g.dtype, g.device, self._preconditioner_max_size), 
+                #                                                             initQ(g.shape[1], g.dtype, g.device, self._preconditioner_max_size)] for g in grads]
             # update the preconditioner whitening the gradients 
-            [update_precond_affine_math_(Qlr[0], Qlr[1], torch.randn_like(g), g, self.lr_preconditioner, self.step_normalizer, self._tiny) for (Qlr, g) in zip(self._Qs, grads)]
+            [update_precond_affine_math_(Qlr[0], Qlr[1], f[0](torch.randn_like(g)), f[0](g), self.lr_preconditioner, self.step_normalizer, self._tiny) for (Qlr, f,g) in zip(self._Qs, self._matrixizers, grads)]
+            # [update_precond_affine_math_(Qlr[0], Qlr[1], torch.randn_like(g), g, self.lr_preconditioner, self.step_normalizer, self._tiny) for (Qlr, g) in zip(self._Qs, grads)]
 
         # preconditioned gradients; momentum is optional      
         if self.momentum > 0:
@@ -1630,10 +1724,12 @@ class Affine:
                 self._ms = [(1 - self.momentum)*g for g in grads]
             else:
                 [m.mul_(self.momentum).add_(g, alpha=1 - self.momentum) for (m, g) in zip(self._ms, grads)]
-            pre_grads = [precond_grad_affine_math(Qlr[0], Qlr[1], m) for (Qlr, m) in zip(self._Qs, self._ms)]
+            pre_grads = [precond_grad_affine_math(Qlr[0], Qlr[1], f[0](m)) for (Qlr, f,m) in zip(self._Qs, self._matrixizers, self._ms)]
+            # pre_grads = [precond_grad_affine_math(Qlr[0], Qlr[1], m) for (Qlr, m) in zip(self._Qs, self._ms)]
         else:
             self._ms = None # clean the buffer when momentum is set to zero 
-            pre_grads = [precond_grad_affine_math(Qlr[0], Qlr[1], g) for (Qlr, g) in zip(self._Qs, grads)]
+            pre_grads = [precond_grad_affine_math(Qlr[0], Qlr[1], f[0](g)) for (Qlr, f,g) in zip(self._Qs, self._matrixizers, grads)]
+            # pre_grads = [precond_grad_affine_math(Qlr[0], Qlr[1], g) for (Qlr, g) in zip(self._Qs, grads)]
             
         # gradient clipping is optional
         if self.grad_clip_max_norm is None:
@@ -1644,9 +1740,11 @@ class Affine:
             
         # update the parameters
         if self.exact_hessian_vector_product or (vs is None) or (self._preconditioner_type!="Newton"):
-            [param.subtract_(lr*g) for (param, g) in zip(self._params_with_grad, pre_grads)]
+            [param.subtract_(lr*f[1](g)) for (param, f,g) in zip(self._params_with_grad, self._matrixizers, pre_grads)]
+            # [param.subtract_(lr*g) for (param, g) in zip(self._params_with_grad, pre_grads)]
         else: # in this case, do not forget to remove the perturbation on parameters
-            [param.subtract_(lr*g + v) for (param, g, v) in zip(self._params_with_grad, pre_grads, vs)]        
+            [param.subtract_(lr*f[1](g) + v) for (param, f,g,v) in zip(self._params_with_grad, self._matrixizers, pre_grads, vs)]
+            # [param.subtract_(lr*g + v) for (param, g, v) in zip(self._params_with_grad, pre_grads, vs)]        
         
         # return whatever closure returns
         return closure_returns
