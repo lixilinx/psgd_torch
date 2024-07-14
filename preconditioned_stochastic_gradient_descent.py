@@ -1554,6 +1554,96 @@ def update_precond_affine_math_(Ql, Qr, dX, dG, step, step_normalizer, tiny):
     
 
 #@torch.jit.script
+def update_precond_affine_dropv_math_(Ql, Qr, dG, step, step_normalizer, tiny):
+    # type: (Tensor, Tensor, Tensor, float, str, float) -> None
+    """
+    Similar to fuction 
+        update_precond_affine_math_,
+    but exclusively for the Affine gradient whitening preconditioner so that we can integrate out dummy variable v if desirable. 
+    """
+    def balance():      
+        if torch.rand([]) < 0.01:
+            max_l = torch.max(torch.abs(Ql)) 
+            max_r = torch.max(torch.abs(Qr)) 
+            
+            rho = torch.sqrt(max_l/max_r)
+            Ql.div_(rho)
+            Qr.mul_(rho)
+        
+        
+    if Ql.dim()==1 and Qr.dim()==1:
+        # drop v when both dims use diagonal preconditioners 
+        A = Ql[:,None] * dG * Qr.conj()
+        invQQl, invQQr = 1/(Ql*Ql.conj()), 1/(Qr*Qr.conj())
+        
+        AAc1, BBc1 = torch.sum(A*A.conj(), dim=1), torch.sum(invQQr) * invQQl 
+        AAc2, BBc2 = torch.sum(A*A.conj(), dim=0), torch.sum(invQQl) * invQQr 
+        grad1 = AAc1 - BBc1
+        grad2 = AAc2 - BBc2
+    
+        if step_normalizer == '2nd':
+            step1 = step/(torch.max(torch.real(AAc1 + BBc1)) + tiny)
+            step2 = step/(torch.max(torch.real(AAc2 + BBc2)) + tiny)
+        else:
+            step1 = step/(torch.max(torch.abs(grad1)) + tiny)
+            step2 = step/(torch.max(torch.abs(grad2)) + tiny)
+            
+        Ql.sub_(step1*grad1*Ql) 
+        Qr.sub_(step2*grad2*Qr)
+        balance()
+    elif Ql.dim()==1 and Ql.shape[0]>=Qr.shape[0]: # Qr.dim() == 2 in this case 
+        # drop v when left is diagonal, right is dense, and gradient is a tall matrix
+        A = (Ql[:,None]*dG).mm(Qr.H)
+        invQQl = 1/(Ql*Ql.conj())
+        invQr = torch.linalg.solve_triangular(Qr, torch.eye(Qr.shape[0], dtype=Qr.dtype, device=Qr.device), upper=True)
+        invQQr = invQr.H @ invQr
+        
+        AAc, BBc = torch.sum(A*A.conj(), dim=1), torch.trace(invQQr) * invQQl 
+        AhA, BBh = A.H.mm(A), torch.sum(invQQl) * invQQr 
+        grad1 = AAc - BBc
+        grad2 = triu01(AhA - BBh)
+    
+        if step_normalizer == '2nd':
+            step1 = step/(torch.max(torch.real(AAc + BBc)) + tiny)
+            step2 = step/(torch.trace(AhA + BBh) + tiny)
+        else:
+            step1 = step/(torch.max(torch.abs(grad1)) + tiny)
+            step2 = step/(norm_lower_bound(grad2) + tiny)
+            
+        Ql.sub_(step1*grad1*Ql) 
+        Qr.sub_(step2*grad2.mm(Qr))   
+        balance()
+    elif Qr.dim()==1 and Qr.shape[0]>=Ql.shape[0]: # Ql.dim() == 2 in this case 
+        # drop v when right is diagonal, left is dense, and gradient is a short matrix 
+        A = Ql.mm(dG*Qr.conj())
+        invQl = torch.linalg.solve_triangular(Ql, torch.eye(Ql.shape[0], dtype=Ql.dtype, device=Ql.device), upper=True)
+        invQQl = invQl.H @ invQl
+        invQQr = 1/(Qr*Qr.conj())
+        
+        AAh, BhB = A.mm(A.H), torch.sum(invQQr) * invQQl 
+        AAc, BBc = torch.sum(A*A.conj(), dim=0), torch.trace(invQQl) * invQQr 
+        grad1 = triu01(AAh - BhB)
+        grad2 = AAc - BBc
+    
+        if step_normalizer == '2nd':
+            step1 = step/(torch.trace(AAh + BhB) + tiny)
+            step2 = step/(torch.max(torch.real(AAc + BBc)) + tiny)
+        else:
+            step1 = step/(norm_lower_bound(grad1) + tiny)
+            step2 = step/(torch.max(torch.abs(grad2)) + tiny)
+            
+        Ql.sub_(step1*grad1.mm(Ql)) 
+        Qr.sub_(step2*grad2*Qr)
+        balance()
+    else:
+        # keeping v as an auxiliary variable could save computations (tradeoff of performance, similar to Hutchinson’s trick) when
+        #   1) gradient is a tall matrix, but left side is a dense preconditioner, right side is diagonal
+        #   2) gradient is a short matrix, but left side is a diagonal preconditioner, right side is dense
+        #   3) both sides use dense preconditioner, but gradient is skewed (no saving for square shape gradient)
+        update_precond_affine_math_(Ql, Qr, torch.randn_like(dG), dG, step, step_normalizer, tiny)
+
+
+#@torch.jit.script
 def precond_grad_affine_math(Ql, Qr, Grad):
     # type: (Tensor, Tensor, Tensor) -> Tensor
     """
@@ -1715,7 +1805,8 @@ class Affine:
                 # self._Qs = [[(torch.numel(g)/torch.sum(g*g.conj()))**0.25 * initQ(g.shape[0], g.dtype, g.device, self._preconditioner_max_size), 
                 #                                                             initQ(g.shape[1], g.dtype, g.device, self._preconditioner_max_size)] for g in grads]
             # update the preconditioner whitening the gradients 
-            [update_precond_affine_math_(Qlr[0], Qlr[1], f[0](torch.randn_like(g)), f[0](g), self.lr_preconditioner, self.step_normalizer, self._tiny) for (Qlr, f,g) in zip(self._Qs, self._matrixizers, grads)]
+            [update_precond_affine_dropv_math_(Qlr[0], Qlr[1], f[0](torch.randn_like(g)), f[0](g), self.lr_preconditioner, self.step_normalizer, self._tiny) for (Qlr, f,g) in zip(self._Qs, self._matrixizers, grads)]
+            # [update_precond_affine_math_(Qlr[0], Qlr[1], f[0](torch.randn_like(g)), f[0](g), self.lr_preconditioner, self.step_normalizer, self._tiny) for (Qlr, f,g) in zip(self._Qs, self._matrixizers, grads)]
             # [update_precond_affine_math_(Qlr[0], Qlr[1], torch.randn_like(g), g, self.lr_preconditioner, self.step_normalizer, self._tiny) for (Qlr, g) in zip(self._Qs, grads)]
 
         # preconditioned gradients; momentum is optional      
