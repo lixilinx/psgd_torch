@@ -1805,7 +1805,7 @@ class Affine:
                 # self._Qs = [[(torch.numel(g)/torch.sum(g*g.conj()))**0.25 * initQ(g.shape[0], g.dtype, g.device, self._preconditioner_max_size), 
                 #                                                             initQ(g.shape[1], g.dtype, g.device, self._preconditioner_max_size)] for g in grads]
             # update the preconditioner whitening the gradients 
-            [update_precond_affine_dropv_math_(Qlr[0], Qlr[1], f[0](torch.randn_like(g)), f[0](g), self.lr_preconditioner, self.step_normalizer, self._tiny) for (Qlr, f,g) in zip(self._Qs, self._matrixizers, grads)]
+            [update_precond_affine_dropv_math_(Qlr[0], Qlr[1], f[0](g), self.lr_preconditioner, self.step_normalizer, self._tiny) for (Qlr, f,g) in zip(self._Qs, self._matrixizers, grads)]
             # [update_precond_affine_math_(Qlr[0], Qlr[1], f[0](torch.randn_like(g)), f[0](g), self.lr_preconditioner, self.step_normalizer, self._tiny) for (Qlr, f,g) in zip(self._Qs, self._matrixizers, grads)]
             # [update_precond_affine_math_(Qlr[0], Qlr[1], torch.randn_like(g), g, self.lr_preconditioner, self.step_normalizer, self._tiny) for (Qlr, g) in zip(self._Qs, grads)]
 
