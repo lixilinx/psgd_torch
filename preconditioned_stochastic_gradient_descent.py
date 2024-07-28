@@ -638,8 +638,11 @@ def update_precond_UVd_math_(U, V, d, v, h, step, step_normalizer, tiny):
     IpVtU = I + VtU
     invQtv = v/d
     # torch's linalg.solve is slow for small matrix
-    invQtv = invQtv - V.mm(torch.linalg.solve(IpVtU.t(), U.t().mm(invQtv)))  
-    invPv  = invQtv - U.mm(torch.linalg.solve(IpVtU,     V.t().mm(invQtv)))
+    # invQtv = invQtv - V.mm(torch.linalg.solve(IpVtU.t(), U.t().mm(invQtv)))  
+    # invPv  = invQtv - U.mm(torch.linalg.solve(IpVtU,     V.t().mm(invQtv)))
+    LU, pivots = torch.linalg.lu_factor(IpVtU)
+    invQtv = invQtv - V.mm(torch.linalg.lu_solve(LU, pivots, U.t().mm(invQtv), adjoint=True))
+    invPv  = invQtv - U.mm(torch.linalg.lu_solve(LU, pivots, V.t().mm(invQtv)))
     invPv = invPv/d
 
     nablaD = Ph*h - v*invPv
