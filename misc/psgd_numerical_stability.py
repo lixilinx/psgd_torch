@@ -71,7 +71,7 @@ for count, eps in enumerate([0, 1e-2]):
         v = torch.randn(N, 1)
         h = H @ v + eps * torch.randn(N, 1)
 
-        psgd.update_precond_newton_math_(Q, invQ, v, h, step, "2nd", 0.0)
+        psgd.update_precond_newton_math_(Q, invQ, v, h, 2 * step, "2nd", 0.0)
 
     ax.semilogy(range(1, 1 + num_iterations), Loss, "b")
 

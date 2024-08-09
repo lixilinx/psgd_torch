@@ -213,7 +213,7 @@ for resample in [False, True]:
     
     
     TrainLosses, best_test_loss = [], 1.0
-    lr, grad_norm_clip_thr = 1.0, 100.0
+    lr, grad_norm_clip_thr = 1.0, 10.0
     total_time = 0.0
     for epoch in range(num_iterations):
         total_loss = 0.0
@@ -264,7 +264,7 @@ for resample in [False, True]:
         preconditioner_init_scale=1.0,
         lr_params=0.1,
         lr_preconditioner=0.1,
-        grad_clip_max_norm=100.0,
+        grad_clip_max_norm=10.0,
     )
     # opt = psgd.LRA(lenet5.parameters(), preconditioner_init_scale=None, lr_params=0.1, lr_preconditioner=0.1, grad_clip_max_norm=10.0)
     
@@ -279,10 +279,13 @@ for resample in [False, True]:
                 data = torch.bernoulli(data)
     
             def closure():
-                return train_loss(data, target)
+                xentropy = train_loss(data, target) 
+                # we add L2 term, eps*sum(p*p), to avoid hessian underflow
+                L2 = 1e-9*sum([torch.sum(torch.rand_like(p) * p * p) for p in opt._params_with_grad])
+                return (xentropy + L2, xentropy)
     
-            loss = opt.step(closure).item()
-            total_loss += loss
+            _, loss = opt.step(closure)
+            total_loss += loss.item()
         total_time += time.time() - t0
         TrainLosses.append(total_loss/len(train_loader))
     
