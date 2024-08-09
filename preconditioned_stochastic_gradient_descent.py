@@ -26,6 +26,13 @@ By default, the 2nd (previously 1st) order derivative info is used to normalized
 For class Newton optimizer, also providing a choice for keeping inv(Q) via matrix inverse rank-2 update.  
 Update rule for a triangular Q is modified to approximately match that on GL(n, R).
 Functional usage of PSGD is to be deprecated, and not updated.  
+
+Updates in 2024 Aug:
+Reversing triu01 back to triu. 
+QR approximation via triu01, i.e., 
+    [I + A]_R = I + triu(A) + triu(A, 1)
+is fairly accurate when ||A|| < 0.25, but causes regressions for large lr_preconditioner.
+Impacted classes: Affine and Newton.    
 """
 
 import torch
@@ -38,22 +45,28 @@ def norm_lower_bound(A):
         norm(A) <= sqrt(2) * norm_lower_bound(A)
     Looks to be a very tight lower bound.
     """
-    aa = torch.real(A * A.conj())
-    value0, i = torch.max(torch.sum(aa, dim=0), 0)
-    value1, j = torch.max(torch.sum(aa, dim=1), 0)
-    if value0 > value1:
-        x = A[:, i].conj() @ A
-        # We must have norm(x) > 0 since norm(x) >= value0 > value1 >= 0
-        # Also, avoid expression norm(x*A^H)/norm(x) as x*A^H could under/over flow
-        return torch.linalg.vector_norm((x / torch.linalg.vector_norm(x)) @ A.H)
-    else:
-        x = A @ A[j].conj()
-        normx = torch.linalg.vector_norm(x)
-        if normx > 0:
-            # Again, avoid expression norm(A^H*x)/norm(x) as A^H*x could under/over flow
-            return torch.linalg.vector_norm(A.H @ (x / normx))
-        else:  # A = 0
-            return normx
+    max_abs = torch.max(torch.abs(A)) # used to normalize A to avoid numerically under- or over-flow
+    if max_abs > 0:
+        A = A/max_abs
+        aa = torch.real(A * A.conj())
+        value0, i = torch.max(torch.sum(aa, dim=0), 0)
+        value1, j = torch.max(torch.sum(aa, dim=1), 0)
+        if value0 > value1:
+            x = A[:, i].conj() @ A
+            # We must have norm(x) > 0 since norm(x) >= value0 > value1 >= 0
+            # Also, avoid expression norm(x*A^H)/norm(x) as x*A^H could under/over flow
+            return max_abs * torch.linalg.vector_norm((x / torch.linalg.vector_norm(x)) @ A.H)
+        else:
+            x = A @ A[j].conj()
+            # normx = torch.linalg.vector_norm(x)
+            # if normx > 0:
+            #     # Again, avoid expression norm(A^H*x)/norm(x) as A^H*x could under/over flow
+            #     return max_abs * torch.linalg.vector_norm(A.H @ (x / normx))
+            # else:  # A = 0
+            #     return normx
+            return max_abs * torch.linalg.vector_norm(A.H @ (x / torch.linalg.vector_norm(x)))
+    else: # must have A=0
+        return max_abs 
     
 
 def woodbury_identity_(invA, U, V):
@@ -1154,8 +1167,8 @@ def update_precond_newton_math_(Q, invQ, v, h, step, step_normalizer, tiny):
         woodbury_identity_(invQ, U, V)    
     else:
         b = torch.linalg.solve_triangular(Q.t(), v, upper=False)
-        # grad = torch.triu(a.mm(a.t()) - b.mm(b.t()))
-        grad = triu01(a.mm(a.t()) - b.mm(b.t()))
+        grad = torch.triu(a.mm(a.t()) - b.mm(b.t()))
+        # grad = triu01(a.mm(a.t()) - b.mm(b.t()))
         if step_normalizer == '2nd':
             mu = step/(torch.sum(a*a + b*b) + tiny)
         else:
@@ -1475,16 +1488,19 @@ def update_precond_affine_math_(Ql, Qr, dX, dG, step, step_normalizer, tiny):
             Bh = torch.linalg.solve_triangular(Ql.H, torch.linalg.solve_triangular(Qr, dX, upper=True, left=False), upper=False) # Bh is B^H 
             
             AhA, BhB = A.H.mm(A), Bh.mm(Bh.H)
+            AAh, BBh = A.mm(A.H), Bh.H.mm(Bh)
             # grad1 = torch.triu(A.mm(A.H) - Bh.mm(Bh.H))
             # grad1 = torch.triu(A.mm(A.H) - BhB)
-            grad1 = triu01(A.mm(A.H) - BhB)
+            grad1 = torch.triu(AAh - BhB)
+            # grad1 = triu01(A.mm(A.H) - BhB)
             # grad2 = torch.triu(A.H.mm(A) - Bh.H.mm(Bh))
             # grad2 = torch.triu(AhA - Bh.H.mm(Bh))
-            grad2 = triu01(AhA - Bh.H.mm(Bh))
+            grad2 = torch.triu(AhA - BBh)
+            # grad2 = triu01(AhA - Bh.H.mm(Bh))
             
             if step_normalizer == '2nd':
-                step1 = step/(torch.trace(AhA) + torch.trace(BhB) + tiny)
-                step2 = step1
+                step1 = step/(norm_lower_bound(AAh + BhB) + tiny)
+                step2 = step/(norm_lower_bound(AhA + BBh) + tiny)
             else:
                 step1 = step/(norm_lower_bound(grad1) + tiny)
                 step2 = step/(norm_lower_bound(grad2) + tiny)
@@ -1498,13 +1514,13 @@ def update_precond_affine_math_(Ql, Qr, dX, dG, step, step_normalizer, tiny):
             AAh, BhB = A.mm(A.H), Bh.mm(Bh.H)
             AAc, BBc = torch.sum(A*A.conj(), dim=0), torch.sum(Bh*Bh.conj(), dim=0)
             # grad1 = torch.triu(A.mm(A.H) - Bh.mm(Bh.H))
-            # grad1 = torch.triu(AAh - BhB)
-            grad1 = triu01(AAh - BhB)
+            grad1 = torch.triu(AAh - BhB)
+            # grad1 = triu01(AAh - BhB)
             # grad2 = torch.sum(A*A.conj(), dim=0) - torch.sum(Bh*Bh.conj(), dim=0)
             grad2 = AAc - BBc
         
             if step_normalizer == '2nd':
-                step1 = step/(torch.trace(AAh + BhB) + tiny)
+                step1 = step/(norm_lower_bound(AAh + BhB) + tiny)
                 step2 = step/(torch.max(torch.real(AAc + BBc)) + tiny)
             else:
                 step1 = step/(norm_lower_bound(grad1) + tiny)
@@ -1522,12 +1538,12 @@ def update_precond_affine_math_(Ql, Qr, dX, dG, step, step_normalizer, tiny):
             # grad1 = torch.sum(A*A.conj(), dim=1) - torch.sum(Bh*Bh.conj(), dim=1)
             grad1 = AAc - BBc
             # grad2 = torch.triu(A.H.mm(A) - Bh.H.mm(Bh))
-            # grad2 = torch.triu(AhA - BBh)
-            grad2 = triu01(AhA - BBh)
+            grad2 = torch.triu(AhA - BBh)
+            # grad2 = triu01(AhA - BBh)
         
             if step_normalizer == '2nd':
                 step1 = step/(torch.max(torch.real(AAc + BBc)) + tiny)
-                step2 = step/(torch.trace(AhA + BBh) + tiny)
+                step2 = step/(norm_lower_bound(AhA + BBh) + tiny)
             else:
                 step1 = step/(torch.max(torch.abs(grad1)) + tiny)
                 step2 = step/(norm_lower_bound(grad2) + tiny)
@@ -1604,11 +1620,11 @@ def update_precond_affine_dropv_math_(Ql, Qr, dG, step, step_normalizer, tiny):
         AAc, BBc = torch.sum(A*A.conj(), dim=1), torch.trace(invQQr) * invQQl 
         AhA, BBh = A.H.mm(A), torch.sum(invQQl) * invQQr 
         grad1 = AAc - BBc
-        grad2 = triu01(AhA - BBh)
+        grad2 = torch.triu(AhA - BBh)
     
         if step_normalizer == '2nd':
             step1 = step/(torch.max(torch.real(AAc + BBc)) + tiny)
-            step2 = step/(torch.trace(AhA + BBh) + tiny)
+            step2 = step/(norm_lower_bound(AhA + BBh) + tiny)
         else:
             step1 = step/(torch.max(torch.abs(grad1)) + tiny)
             step2 = step/(norm_lower_bound(grad2) + tiny)
@@ -1625,11 +1641,11 @@ def update_precond_affine_dropv_math_(Ql, Qr, dG, step, step_normalizer, tiny):
         
         AAh, BhB = A.mm(A.H), torch.sum(invQQr) * invQQl 
         AAc, BBc = torch.sum(A*A.conj(), dim=0), torch.trace(invQQl) * invQQr 
-        grad1 = triu01(AAh - BhB)
+        grad1 = torch.triu(AAh - BhB)
         grad2 = AAc - BBc
     
         if step_normalizer == '2nd':
-            step1 = step/(torch.trace(AAh + BhB) + tiny)
+            step1 = step/(norm_lower_bound(AAh + BhB) + tiny)
             step2 = step/(torch.max(torch.real(AAc + BBc)) + tiny)
         else:
             step1 = step/(norm_lower_bound(grad1) + tiny)
