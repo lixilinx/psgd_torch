@@ -224,7 +224,7 @@ Net = ViT(
     mlp_dim=256,
     dropout=0.1,
     emb_dropout=0.1,
-).to(device)
+)
 
 
 """
@@ -248,9 +248,10 @@ def test(net, data_loader):
 
 
 """
-Now we compare Adam (the default optimizer for transformer) and PSGD 
+Now we compare Adam(W) (the default optimizer for transformer) and PSGD.
+We align their settings, and the only difference is their preconditioners.  
 """
-num_iterations = 100
+num_epochs = 100
 ax1 = plt.subplot(121)
 ax2 = plt.subplot(122)
 ax1.yaxis.tick_right()
@@ -260,12 +261,13 @@ ax2.yaxis.tick_right()
 Adam 
 """
 net = copy.deepcopy(Net).to(device)
-opt = torch.optim.Adam(net.parameters(), lr=1e-3)  # will anneal lr to 1e-4
+lr0 = 1e-3
+opt = torch.optim.Adam(net.parameters(), lr=lr0)  # will aneal lr to lr0/num_epochs
 
 TrainLoss = []
 TestAcc = []
 t0 = time.time()
-for epoch in range(num_iterations):
+for epoch in range(num_epochs):
     """train"""
     net.train()
     for _, (inputs, targets) in enumerate(train_loader):
@@ -273,7 +275,7 @@ for epoch in range(num_iterations):
 
         def closure():
             outputs = net(inputs)
-            loss = nn.CrossEntropyLoss()(outputs, targets)
+            loss = nn.functional.cross_entropy(outputs, targets)
             return loss
 
         opt.zero_grad()
@@ -288,7 +290,7 @@ for epoch in range(num_iterations):
     TestAcc.append(test_acc)
     print(f"Adam, epoch {epoch + 1}, best test accuracy {max(TestAcc)}")
 
-    opt.param_groups[0]["lr"] -= (1e-3 - 1e-4) / (num_iterations - 1)
+    opt.param_groups[0]["lr"] -= lr0 / num_epochs
 
 total_time = time.time() - t0
 
@@ -307,14 +309,14 @@ PSGD
 """
 net = copy.deepcopy(Net).to(device)
 
-
+lr0 = 1e-3  # keep the same as Adam
 opt = psgd.Affine(
     net.parameters(),
     preconditioner_init_scale=1.0,
-    preconditioner_max_skew=1,  # use diag preconditioner for the larger dim
-    lr_params=1e-3,  # will anneal to 1e-4
+    preconditioner_max_skew=10.0,  # use diag preconditioner for the larger dim
+    lr_params=lr0,  # will aneal to lr0/num_epochs
     lr_preconditioner=0.1,  # will anneal to 0.01
-    preconditioner_update_probability=1.0,  # will reduce to << 1
+    preconditioner_update_probability=1.0,  # will anneal to 0.01
     momentum=0.9,
     preconditioner_type="whitening",
 )
@@ -323,7 +325,7 @@ TrainLoss = []
 TestAcc = []
 
 t0 = time.time()
-for epoch in range(num_iterations):
+for epoch in range(num_epochs):
     """train"""
     net.train()
     for _, (inputs, targets) in enumerate(train_loader):
@@ -331,7 +333,7 @@ for epoch in range(num_iterations):
 
         def closure():
             outputs = net(inputs)
-            loss = nn.CrossEntropyLoss()(outputs, targets)
+            loss = nn.functional.cross_entropy(outputs, targets)
             return loss
 
         loss = opt.step(closure)
@@ -343,11 +345,11 @@ for epoch in range(num_iterations):
     TestAcc.append(test_acc)
     print(f"PSGD, epoch {epoch + 1}, best test accuracy {max(TestAcc)}")
 
-    opt.lr_params -= (1e-3 - 1e-4) / (num_iterations - 1)
-    opt.lr_preconditioner = max(0.01, 0.1 / (epoch + 1 + 1))
-    # opt.lr_preconditioner *= 0.1**(1/(num_iterations - 1))
-    opt.preconditioner_update_probability = max(0.05, 1 / (epoch + 1 + 1))
-
+    opt.lr_params -= lr0 / num_epochs
+    opt.lr_preconditioner = max(0.01, 0.1**0.05 * opt.lr_preconditioner)
+    opt.preconditioner_update_probability = max(
+        0.01, 0.1**0.1 * opt.preconditioner_update_probability
+    )
 
 total_time = time.time() - t0
 
@@ -383,6 +385,7 @@ ax2.legend(
     ],
     fontsize=7,
 )
+ax2.set_ylim([min(TestAcc), max(TestAcc)])
 ax2.set_title("(b)", fontsize=7)
 
 plt.savefig("vit_adam_vs_psgd.svg")

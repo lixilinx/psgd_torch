@@ -291,7 +291,9 @@ class GPT(nn.Module):
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
             loss = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)),
+                logits.reshape(
+                    -1, logits.size(-1)
+                ),  # I changed to reshape; view doesn't work in my config
                 targets.reshape(-1),
                 ignore_index=-1,
             )
@@ -306,14 +308,31 @@ class GPT(nn.Module):
 
 
 """
-Adam vs PSGD on a tiny gpt 
+AdamW vs PSGD-affine-whitening on a tiny gpt model.
+We align their settings, and the only difference is preconditioner.   
 """
-batchsize = 72
-block_size = 100
+
+batchsize = 80
+block_size = 100  # quadratic growth wrt block size!
 num_iterations = 100_000
 eval_every = num_iterations // 100
-tinyConfig = GPTConfig(block_size=block_size, n_layer=4, n_head=12, n_embd=216)
+tinyConfig = GPTConfig(block_size=block_size, n_layer=6, n_head=12, n_embd=384)
 tinyGpt = GPT(tinyConfig)
+
+
+def test(data, model):
+    model.eval()
+    with torch.no_grad():
+        total_loss = 0.0
+        num_trials = math.ceil(len(data) / (batchsize * block_size))
+        for _ in range(num_trials):
+            inputs, targets = get_batch(data, batchsize, block_size)
+            inputs, targets = inputs.to(device), targets.to(device)
+            _, loss = gpt(inputs, targets)
+            total_loss += loss
+    model.train()
+    return total_loss.item() / num_trials
+
 
 ax1 = plt.subplot(121)
 ax2 = plt.subplot(122)
@@ -324,7 +343,7 @@ ax2.yaxis.tick_right()
 AdamW 
 """
 lr0 = 1e-3
-decoupled_wd = 1e-6
+decoupled_wd = 1e-6  # tiny model; no need of large wd
 gpt = copy.deepcopy(tinyGpt).to(device)
 opt = torch.optim.AdamW(gpt.parameters(), lr=lr0, weight_decay=decoupled_wd)
 
@@ -346,28 +365,13 @@ for num_iter in range(num_iterations):
     opt.step()
     TrainLoss.append(loss.item())
 
+    """test"""
     if (num_iter + 1) % eval_every == 0:
-        """test"""
-        gpt.eval()
-        with torch.no_grad():
-            total_loss = 0.0
-            num_trials = math.ceil(
-                len(tokenized_data["eval"]) / (batchsize * block_size)
-            )
-            for _ in range(num_trials):
-                inputs, targets = get_batch(
-                    tokenized_data["eval"], batchsize, block_size
-                )
-                inputs, targets = inputs.to(device), targets.to(device)
-                _, loss = gpt(inputs, targets)
-                total_loss += loss
-            EvalLoss.append(total_loss.item() / num_trials)
-        gpt.train()
-
+        EvalLoss.append(test(tokenized_data["eval"], gpt))
         print(f"AdamW, iter {num_iter + 1}, eval loss {EvalLoss[-1]}")
 
-    # opt.param_groups[0]["lr"] -= lr0 / num_iterations
-    opt.param_groups[0]["lr"] *= 0.1 ** (1 / num_iterations)
+    opt.param_groups[0]["lr"] -= lr0 / num_iterations
+    # opt.param_groups[0]["lr"] *= 0.1 ** (1 / num_iterations)
 
 total_time = time.time() - t0
 
@@ -386,12 +390,12 @@ PSGD
 """
 gpt = copy.deepcopy(tinyGpt).to(device)
 
-lr0 = 1e-3
-decoupled_wd = 1e-6
+lr0 = 1e-3  # keep the same setting as AdamW
+decoupled_wd = 1e-6  # keep the same setting as AdamW
 opt = psgd.Affine(
     gpt.parameters(),
     preconditioner_init_scale=1.0,
-    preconditioner_max_skew=10,
+    preconditioner_max_skew=10.0,
     lr_params=lr0,
     lr_preconditioner=0.1,
     preconditioner_update_probability=1.0,
@@ -413,7 +417,7 @@ for num_iter in range(num_iterations):
         # L2 = 1e-6*sum([torch.sum(torch.rand_like(p) * p * p) for p in opt._params_with_grad])
         return loss
 
-    with torch.no_grad():
+    with torch.no_grad():  # decoupled weight decay
         [
             p.subtract_(opt.lr_preconditioner * decoupled_wd * p)
             for p in opt._params_with_grad
@@ -421,32 +425,17 @@ for num_iter in range(num_iterations):
     loss = opt.step(closure)
     TrainLoss.append(loss.item())
 
+    """test"""
     if (num_iter + 1) % eval_every == 0:
-        """test"""
-        gpt.eval()
-        with torch.no_grad():
-            total_loss = 0.0
-            num_trials = math.ceil(
-                len(tokenized_data["eval"]) / (batchsize * block_size)
-            )
-            for _ in range(num_trials):
-                inputs, targets = get_batch(
-                    tokenized_data["eval"], batchsize, block_size
-                )
-                inputs, targets = inputs.to(device), targets.to(device)
-                _, loss = gpt(inputs, targets)
-                total_loss += loss
-            EvalLoss.append(total_loss.item() / num_trials)
-        gpt.train()
-
+        EvalLoss.append(test(tokenized_data["eval"], gpt))
         print(f"PSGD, iter {num_iter + 1}, eval loss {EvalLoss[-1]}")
 
     opt.preconditioner_update_probability = max(
-        0.01, 0.1 ** (1 / 20000) * opt.preconditioner_update_probability
+        0.01, 0.1 ** (1 / 10000) * opt.preconditioner_update_probability
     )
-    opt.lr_preconditioner = max(0.01, (0.1) ** (1 / 10000) * opt.lr_preconditioner)
-    # opt.lr_params -= lr0 / num_iterations
-    opt.lr_params *= 0.1 ** (1 / (num_iterations - 1))
+    opt.lr_preconditioner = max(0.01, (0.1) ** (1 / 20000) * opt.lr_preconditioner)
+    opt.lr_params -= lr0 / num_iterations
+    # opt.lr_params *= 0.1 ** (1 / (num_iterations - 1))
 
 total_time = time.time() - t0
 
