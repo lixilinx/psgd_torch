@@ -3,7 +3,7 @@
 ### An overview
 PSGD (Preconditioned SGD) is a general purpose (mathematical and stochastic, convex and nonconvex) 2nd order optimizer. It reformulates a wide range of preconditioner estimation and Hessian fitting problems as a family of strongly convex Lie group optimization problems. 
 
-Notations: $E_z[\ell(\theta, z)]$ or $\ell(\theta)$ the loss;  $g$ the (stochastic) gradient wrt $\theta$; $H$ the Hessian;  $h=Hv$ the Hessian-vector product with ${v\sim\mathcal{N}(0,I)}$; $P=Q^TQ$ the preconditioner applying on $g$; ${\rm tri}$ takes the upper or lower triangular part of a matrix; superscripts $^T$ and $^H$ for transpose and Hermitian transpose, respectively.
+Notations: $E_z[\ell(\theta, z)]$ or $\ell(\theta)$ the loss;  $g$ the (stochastic) gradient wrt $\theta$; $H$ the Hessian;  $h=Hv$ the Hessian-vector product with ${v\sim\mathcal{N}(0,I)}$; $P=Q^TQ$ the preconditioner applying on $g$; ${\rm tri}$ takes the upper or lower triangular part of a matrix; $\lVert \cdot \rVert$ takes spectral norm; superscripts $^T$ and $^H$ for transpose and Hermitian transpose, respectively.
 <!---; $[I+A]_R\approx I + {\rm triu}(A) + {\rm triu}(A,1)$ for $\|\|A\|\| < 1$, where $[\cdot]_R$ keeps $R$ of a QR decomposition.--->
 
 #### Table I: Variations of preconditioner fitting criterion
@@ -63,9 +63,11 @@ A few more details. The Hessian-vector products are calculated as a vector-jacob
 
 [Rosenbrock function](https://github.com/lixilinx/psgd_torch/blob/master/hello_psgd.py): see how simple to apply PSGD to convex and stochastic optimizations. The most important three settings are: preconditioner_init_scale (unnormalized), lr_params (normalized) and lr_preconditioner (normalized). 
 
-[LeNet5 CNN](https://github.com/lixilinx/psgd_torch/blob/master/mnist_with_lenet5.py): PSGD on convolutional neural network training with the classic LeNet5 for MNIST digits recognition. Also see [this](https://github.com/lixilinx/psgd_torch/blob/master/misc/affine_wrapping_F_conv2d.py) for another implementation and comparison with Shampoo. 
+[LeNet5 CNN](https://github.com/lixilinx/psgd_torch/blob/master/mnist_with_lenet5.py): PSGD on convolutional neural network training with the classic LeNet5 for MNIST digits recognition. Also see [this](https://github.com/lixilinx/psgd_torch/blob/master/misc/affine_wrapping_F_conv2d.py) for another implementation and comparison with Shampoo (PSGD generalizes significantly better). 
 
-[Vision transformer](https://github.com/lixilinx/psgd_torch/blob/master/misc/vit.py): CIFAR image recognition with a tiny transformer. PSGD halves the training time of Adam and yet consumes less memory with settings preconditioner_max_skew=1 and preconditioner_type="whitening".  
+[Vision transformer](https://github.com/lixilinx/psgd_torch/blob/master/misc/vit.py): CIFAR image recognition with a tiny transformer. PSGD converges significantly faster and generalizes better than Adam(W). Check [here](https://drive.google.com/file/d/1nOnl8MW2OdWGriyR1rn3DqEJ8IqMwoG4/view?usp=drive_link) for sample results.
+
+[Generative pre-trained transformer](https://github.com/lixilinx/psgd_torch/blob/master/misc/gpt2.py): A tiny GPT model for the WikiText-103 Dataset. PSGD also converges faster and generalizes better than Adam(W). Check [here](https://drive.google.com/file/d/176jqghbsOWtJPMSVpAx1JlN5pVMRCd2O/view?usp=drive_link) for sample results.   
  
 [Delayed XOR with RNN](https://github.com/lixilinx/psgd_torch/blob/master/lstm_with_xor_problem.py): demonstration of PSGD on gated recurrent neural network (RNN) learning with the delayed XOR problem proposed in the [LSTM paper](https://www.researchgate.net/publication/13853244_Long_Short-term_Memory). Note that neither LSTM nor the vanilla RNN can solve this "naive" problem with most optimizers, while PSGD can, with either the LSTM or the vanilla RNN (also see [this](https://github.com/lixilinx/psgd_torch/blob/master/rnn_xor_problem_general_purpose_preconditioner.py) and [this](https://github.com/lixilinx/psgd_torch/blob/master/misc/affine_wrapping_VF_rnn_tanh.py) with simple RNNs).
 
