@@ -343,7 +343,7 @@ ax2.yaxis.tick_right()
 AdamW 
 """
 lr0 = 1e-3
-decoupled_wd = 1e-6  # tiny model; no need of large wd
+decoupled_wd = 1e-2  # tiny model; no need of large wd
 gpt = copy.deepcopy(tinyGpt).to(device)
 opt = torch.optim.AdamW(gpt.parameters(), lr=lr0, weight_decay=decoupled_wd)
 
@@ -391,7 +391,7 @@ PSGD
 gpt = copy.deepcopy(tinyGpt).to(device)
 
 lr0 = 1e-3  # keep the same setting as AdamW
-decoupled_wd = 1e-6  # keep the same setting as AdamW
+decoupled_wd = 1e-2  # keep the same setting as AdamW
 opt = psgd.Affine(
     gpt.parameters(),
     preconditioner_init_scale=1.0,
@@ -419,7 +419,7 @@ for num_iter in range(num_iterations):
 
     with torch.no_grad():  # decoupled weight decay
         [
-            p.subtract_(opt.lr_preconditioner * decoupled_wd * p)
+            p.subtract_(opt.lr_params * decoupled_wd * p)
             for p in opt._params_with_grad
         ]
     loss = opt.step(closure)
