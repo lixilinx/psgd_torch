@@ -55,15 +55,16 @@ precond_grad = precond_grad_kron_math(Q, exprs, G)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
 
-#%% 
+#%%
 print("Test case: tri preconditioner ")
-H = torch.complex(torch.rand(10), torch.zeros(10))
+H = torch.randn(10, 10, dtype=torch.complex64)
+H = H @ H.H
 V = torch.randn(10, dtype=torch.complex64)
 Q, exprs = init_Q_exprs(V, 1.0, float("inf"), float("inf"))
 
 for i in range(num_iterations):
     V = torch.randn(10, dtype=torch.complex64)
-    G = H * V 
+    G = H @ V 
     
     update_precond_kron_math_(Q, exprs, V, G, 0.5, "2nd", 0.0) # Newton
     # update_precond_kron_math_(Q, exprs, None, G, (1-i/num_iterations), "2nd", 0.0) # whitening; drop V
