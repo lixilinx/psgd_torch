@@ -36,7 +36,7 @@ Impacted classes: Affine and Newton.
 
 Updates in 2024 Sept:
 Reverting update_precond_affine_dropv_math_ back to update_precond_affine_math_ for the PSGD affine whitening preconditioner.
-Integrating out v occasionally causes issues due to the way PSGD normalizes gradients in Lie groups.
+Integrating out v requires more accurate Lipschitz constant estimate of the preconditioner estimation criterion (nontrivial!).
 Add class Kron for Kronecker product preconditioner applicable to tensors with any dims. 
 """
 
@@ -1986,10 +1986,9 @@ def update_precond_kron_math_(Q, exprs, V, G, step, step_normalizer, tiny):
     if order>1 and torch.rand([])<0.01:
         # balance the dynamic range of Q if there are more than one factors 
         norms = [torch.max(torch.abs(q)) for q in Q]
-        large, small = max(norms), min(norms)
-        rho = torch.sqrt(large/small)
-        Q[norms.index(large)].div_(rho)
-        Q[norms.index(small)].mul_(rho)
+        gmean = (torch.cumprod(torch.stack(norms), dim=0)[-1])**(1/order) # geometric mean 
+        for i, q in enumerate(Q):
+            q.mul_(gmean/norms[i]) 
     
     exprA, exprGs, _ = exprs
     
