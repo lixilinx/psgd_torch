@@ -1910,17 +1910,17 @@ def init_Q_exprs(t, scale, max_size, max_skew):
             raise ValueError(f"Got tensor with dim {len(t.shape)}; Einstein runs out of letters; Replace 26 with larger numbers!")   
             
         scale = scale ** (1/len(shape))
-        if len(shape) == 1:
-            beta_size = 1 # 2nd largest size 
-        else:
-            beta_size = sorted(list(shape))[-2]
+        # if len(shape) == 1:
+        #     beta_size = 1 # 2nd largest size 
+        # else:
+        #     beta_size = sorted(list(shape))[-2]
     
         Q = []
         exprGs = []
         piece1A, piece2A, piece3A = [], "", "" # used for getting the subscripts for exprA
         piece1P, piece2P, piece3P, piece4P = [], [], "", "" # used for getting the subscripts for exprP
         for i, size in enumerate(shape):
-            if size == 1 or size > max_size or size > max_skew * beta_size:
+            if size == 1 or size > max_size or size**2 > max_skew * t.numel():
                 # use diagonal matrix as preconditioner for this dim 
                 Q.append(scale * torch.ones(size, dtype=t.dtype, device=t.device))
                 
@@ -2042,7 +2042,7 @@ class Kron:
     Args for initialization:
         params_with_grad: a list of real or complex scalar or tensor parameters requiring gradients;
         preconditioner_max_size: Qij reduces to a diagonal matrix if its size is larger than preconditioner_max_size, otherwise a triangular matrix;
-        preconditioner_max_skew: for example, if (the largest dim) > preconditioner_max_skew*(other dims), we use diagonal matrix for that dim;
+        preconditioner_max_skew: for example, if (the largest dim) > preconditioner_max_skew*(prod of other dims), we use diagonal matrix for that dim;
         preconditioner_init_scale: initial scale of Q, i.e., Q = preconditioner_init_scale*eye(), with None for automatical setting (NOT recommand);
         lr_params: normalized learning rate for parameters in range [0, 1];
         lr_preconditioner: normalized learning rate for preconditioner in range [0, 1];
