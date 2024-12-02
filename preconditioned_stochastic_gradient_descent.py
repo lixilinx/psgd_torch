@@ -2025,7 +2025,9 @@ def update_precond_kron_math_(Q, exprs, V, G, step, step_normalizer, tiny):
             if q.dim() < 2: # q is a diagonal matrix or scalar
                 q.sub_(step/(torch.max(torch.abs(term1 - term2)) + tiny) * (term1 - term2) * q)    
             else:
-                q.sub_(step/(norm_lower_bound(term1 - term2) + tiny) * torch.triu(term1 - term2) @ q) 
+                # q.sub_(step/(norm_lower_bound(term1 - term2) + tiny) * torch.triu(term1 - term2) @ q) 
+                grad = torch.triu(term1 - term2)
+                q.sub_(step/(norm_lower_bound(grad) + tiny) * grad @ q)
                 
               
 def precond_grad_kron_math(Q, exprs, G):
