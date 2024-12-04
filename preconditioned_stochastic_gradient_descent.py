@@ -43,6 +43,16 @@ Add class Kron for Kronecker product preconditioner applicable to tensors with a
 import opt_einsum
 import torch
 
+def damped_pair_vg(g, damp):
+    """
+    Instead of return (v, g), it returns pair
+        (v, g + sqrt(eps)*mean(abs(g))*v)
+    such that the covariance matrix of modified g is lower bound by
+        eps*mean(abs(g))*I
+    This should guarantee numerical stability with whateven input g.  
+    """
+    v = torch.randn_like(g)
+    return (v, g + damp*torch.mean(torch.abs(g))*v)
 
 def norm_lower_bound(A):
     """
@@ -2172,8 +2182,9 @@ class Kron:
             if self._Qs_exprs is None:
                 self._Qs_exprs = [init_Q_exprs(g, (torch.numel(g)/torch.sum(g*g.conj()))**0.25, self._preconditioner_max_size, self._preconditioner_max_skew) for g in grads]
             # update the preconditioner whitening the gradients 
-            [update_precond_kron_math_(*Q_exprs, torch.randn_like(g), g, self.lr_preconditioner, self.step_normalizer, self._tiny) for (Q_exprs, g) in zip(self._Qs_exprs, grads)]
-
+            # [update_precond_kron_math_(*Q_exprs, torch.randn_like(g), g, self.lr_preconditioner, self.step_normalizer, self._tiny) for (Q_exprs, g) in zip(self._Qs_exprs, grads)]
+            [update_precond_kron_math_(*Q_exprs, *damped_pair_vg(g, self._delta_param_scale), self.lr_preconditioner, self.step_normalizer, self._tiny) for (Q_exprs, g) in zip(self._Qs_exprs, grads)]
+        
         # preconditioned gradients; momentum is optional      
         if self.momentum > 0:
             if self._ms is None:
