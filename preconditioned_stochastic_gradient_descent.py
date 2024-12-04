@@ -43,6 +43,21 @@ Add class Kron for Kronecker product preconditioner applicable to tensors with a
 import opt_einsum
 import torch
 
+def damped_pair_vg(g, damp=2**(-23/2)):
+    """
+    Instead of return (v, g), it returns pair
+        (v, g + sqrt(eps)*mean(abs(g))*v)
+    such that the covariance matrix of the modified g is lower bound by
+        eps * (mean(abs(g)))**2 * I
+    This should damp the preconditioner to encourage numerical stability.
+    The default amount of damping is eps('single'). 
+    
+    If v is integrated out, let's just use the modified g; 
+    If hvp is used, don't use this function, but instead use L2 regularization. 
+    """
+    v = torch.randn_like(g)
+    return (v, g + damp*torch.mean(torch.abs(g))*v)
+
 
 def norm_lower_bound(A):
     """
@@ -879,8 +894,9 @@ class LRA:
             if self._d is None:
                 self._d = (len(grad)/torch.sum(grad*grad))**0.25 * torch.ones_like(grad)
             # update the preconditioner whitening the gradients  
-            v = torch.randn_like(grad)
-            update_precond_UVd_math_(self._U, self._V, self._d, v, grad, self.lr_preconditioner, self.step_normalizer, self._tiny)
+            # v = torch.randn_like(grad)
+            # update_precond_UVd_math_(self._U, self._V, self._d, v, grad, self.lr_preconditioner, self.step_normalizer, self._tiny)
+            update_precond_UVd_math_(self._U, self._V, self._d, *damped_pair_vg(grad), self.lr_preconditioner, self.step_normalizer, self._tiny)
 
         # preconditioned gradients; momentum is optional      
         if self.momentum > 0:
@@ -1097,8 +1113,9 @@ class XMat:
             if self._a is None:
                 self._a = (len(grad)/torch.sum(grad*grad))**0.25 * torch.ones_like(grad)
             # this preconditioner whitens the gradient 
-            v = torch.randn_like(grad)
-            update_precond_Xmat_math_(self._a, self._b, v, grad, self.lr_preconditioner, self.step_normalizer, self._tiny)
+            # v = torch.randn_like(grad)
+            # update_precond_Xmat_math_(self._a, self._b, v, grad, self.lr_preconditioner, self.step_normalizer, self._tiny)
+            update_precond_Xmat_math_(self._a, self._b, *damped_pair_vg(grad), self.lr_preconditioner, self.step_normalizer, self._tiny)
                 
         # preconditioned gradients; momentum is optional           
         if self.momentum > 0:
@@ -1333,8 +1350,9 @@ class Newton:
                 if self._keep_invQ:
                     self._invQ = torch.eye(len(grad), dtype=grad.dtype, device=grad.device) / scale 
             # this preconditioner whitens the gradient 
-            v = torch.randn_like(grad)
-            update_precond_newton_math_(self._Q, self._invQ, v, grad, self.lr_preconditioner, self.step_normalizer, self._tiny)
+            # v = torch.randn_like(grad)
+            # update_precond_newton_math_(self._Q, self._invQ, v, grad, self.lr_preconditioner, self.step_normalizer, self._tiny)
+            update_precond_newton_math_(self._Q, self._invQ, *damped_pair_vg(grad), self.lr_preconditioner, self.step_normalizer, self._tiny)
 
         # preconditioned gradients; momentum is optional             
         if self.momentum > 0:
@@ -2172,7 +2190,8 @@ class Kron:
             if self._Qs_exprs is None:
                 self._Qs_exprs = [init_Q_exprs(g, (torch.numel(g)/torch.sum(g*g.conj()))**0.25, self._preconditioner_max_size, self._preconditioner_max_skew) for g in grads]
             # update the preconditioner whitening the gradients 
-            [update_precond_kron_math_(*Q_exprs, torch.randn_like(g), g, self.lr_preconditioner, self.step_normalizer, self._tiny) for (Q_exprs, g) in zip(self._Qs_exprs, grads)]
+            # [update_precond_kron_math_(*Q_exprs, torch.randn_like(g), g, self.lr_preconditioner, self.step_normalizer, self._tiny) for (Q_exprs, g) in zip(self._Qs_exprs, grads)]
+            [update_precond_kron_math_(*Q_exprs, *damped_pair_vg(g), self.lr_preconditioner, self.step_normalizer, self._tiny) for (Q_exprs, g) in zip(self._Qs_exprs, grads)]
 
         # preconditioned gradients; momentum is optional      
         if self.momentum > 0:
