@@ -43,17 +43,21 @@ Add class Kron for Kronecker product preconditioner applicable to tensors with a
 import opt_einsum
 import torch
 
-def damped_pair_vg(g, damp=2**(-23/2)):
+def damped_pair_vg(g, damp=2**(-13)):
     """
     Instead of return (v, g), it returns pair
         (v, g + sqrt(eps)*mean(abs(g))*v)
     such that the covariance matrix of the modified g is lower bound by
         eps * (mean(abs(g)))**2 * I
     This should damp the preconditioner to encourage numerical stability.
-    The default amount of damping is eps('single'). 
+    The default amount of damping is 2**(-13), slightly smaller than sqrt(eps('single')). 
     
     If v is integrated out, let's just use the modified g; 
-    If hvp is used, don't use this function, but instead use L2 regularization. 
+    If hvp is used, recommend to use L2 regularization to lower bound the Hessian, although this method also works. 
+
+    Please check example
+        https://github.com/lixilinx/psgd_torch/blob/master/misc/psgd_with_finite_precision_arithmetic.py
+    for the rationale to set default damping level to 2**(-13). 
     """
     v = torch.randn_like(g)
     return (v, g + damp*torch.mean(torch.abs(g))*v)
