@@ -1904,13 +1904,15 @@ class Affine:
 #   
 #
 
-def init_Q_exprs(t, scale, max_size, max_skew):
+def init_Q_exprs(t, Scale, max_size, max_skew):
     """
     For a scalar or tensor t, we initialize its preconditioner Q and reusable contraction expressions for updating Q and preconditioning gradient.
     
-    1, Preconditioner Q is initialized to 
-        Q = scale * I = scale * kron(eye(t.shape[0]), eye(t.shape[1]), ...)
+    1, When Scale is not None, preconditioner Q is initialized to 
+        Q = Scale * I = Scale * kron(eye(t.shape[0]), eye(t.shape[1]), ...)
        where the eye(.) may be replaced with diag(ones(.)) if that dim is too large, determined by max_size and max_skew.
+
+       When Scale is None, we initialize Q similarly, but let it whiten t along its smallest dim. 
        
     2, A series of enisum contract expressions. The following subscript examples are for a 5th order tensor.  
         2.1, exprA is the expression for calculating A, e.g.,
@@ -1923,6 +1925,7 @@ def init_Q_exprs(t, scale, max_size, max_skew):
     """
     shape = t.shape 
     if len(shape)==0: # scalar 
+        scale = Scale if Scale else (1/(t*t.conj()))**0.25
         Q = [scale * torch.ones_like(t),]
         exprA = opt_einsum.contract_expression(",->", Q[0].shape, t.shape)
         exprP = opt_einsum.contract_expression(",,->", Q[0].shape, Q[0].shape, t.shape) 
@@ -1931,7 +1934,7 @@ def init_Q_exprs(t, scale, max_size, max_skew):
         if len(shape) > 26:
             raise ValueError(f"Got tensor with dim {len(t.shape)}; Einstein runs out of letters; Replace 26 with larger numbers!")   
             
-        scale = scale ** (1/len(shape))
+        scale = Scale ** (1/len(shape)) if Scale else 1.0 # will correct scale later if Scale is None
         # if len(shape) == 1:
         #     beta_size = 1 # 2nd largest size 
         # else:
@@ -1941,6 +1944,7 @@ def init_Q_exprs(t, scale, max_size, max_skew):
         exprGs = []
         piece1A, piece2A, piece3A = [], "", "" # used for getting the subscripts for exprA
         piece1P, piece2P, piece3P, piece4P = [], [], "", "" # used for getting the subscripts for exprP
+        min_tri_size, min_tri_loc = float("inf"), 0 # bookkeep the smallest tri Q info 
         for i, size in enumerate(shape):
             if size == 1 or size > max_size or size**2 > max_skew * t.numel():
                 # use diagonal matrix as preconditioner for this dim 
@@ -1961,6 +1965,8 @@ def init_Q_exprs(t, scale, max_size, max_skew):
             else:
                 # use triangular matrix as preconditioner for this dim 
                 Q.append(scale * torch.eye(size, dtype=t.dtype, device=t.device))
+                if size <= min_tri_size:
+                    min_tri_size, min_tri_loc = size, i
                 
                 piece1A.append(opt_einsum.get_symbol(i) + opt_einsum.get_symbol(i + 26))
                 piece2A = piece2A + opt_einsum.get_symbol(i + 26)
@@ -1976,6 +1982,17 @@ def init_Q_exprs(t, scale, max_size, max_skew):
                 piece2 = "".join([opt_einsum.get_symbol(i+805) if j==i else opt_einsum.get_symbol(j) for j in range(len(shape))])
                 subscripts = piece1 + "," + piece2 + "->" + opt_einsum.get_symbol(i+26) + opt_einsum.get_symbol(i+805)
                 exprGs.append(opt_einsum.contract_expression(subscripts, t.shape, t.shape))
+
+        if Scale is None: # correct the scale 
+            if min_tri_size**2 <= t.numel(): # let Q[min_tri_loc] whitens t
+                t1 = t.transpose(min_tri_loc, 0)
+                t1 = t1.reshape(min_tri_size, -1)
+                D, U = torch.linalg.eigh(t1 @ t1.H)
+                D = torch.clamp(D, min=1e-6*torch.max(D))
+                _, R = torch.linalg.qr(U @ (U.H * torch.pow(D[:,None], -1/4)))
+                Q[min_tri_loc] = R * (R.diag().real.sign())[:,None]
+            else: # just let Q[min_tri_loc] normalize t 
+                Q[min_tri_loc] *= (1/torch.mean(t*t.conj()))**0.25
         
         subscripts = ",".join(piece1A) + "," + piece2A + "->" + piece3A
         exprA = opt_einsum.contract_expression(subscripts, *[q.shape for q in Q], t.shape)
@@ -2178,7 +2195,8 @@ class Kron:
             # update preconditioner 
             # initialize Qs if it is None 
             if self._Qs_exprs is None:
-                self._Qs_exprs = [init_Q_exprs(v, (torch.sum(v*v.conj())/torch.sum(h*h.conj()))**0.25, self._preconditioner_max_size, self._preconditioner_max_skew) for (v, h) in zip(vs, Hvs)]
+                # self._Qs_exprs = [init_Q_exprs(v, (torch.sum(v*v.conj())/torch.sum(h*h.conj()))**0.25, self._preconditioner_max_size, self._preconditioner_max_skew) for (v, h) in zip(vs, Hvs)]
+                self._Qs_exprs = [init_Q_exprs(h*torch.rsqrt(torch.mean(v*v.conj())), None, self._preconditioner_max_size, self._preconditioner_max_skew) for (v, h) in zip(vs, Hvs)]
             # update self._Qs
             [update_precond_kron_math_(*Q_exprs, v, h, self.lr_preconditioner, self.step_normalizer, self._tiny) for (Q_exprs, v, h) in zip(self._Qs_exprs, vs, Hvs)]
         else:
@@ -2192,7 +2210,8 @@ class Kron:
         # update preconditioner here if it is the whitening type 
         if (self._preconditioner_type!="Newton") and ((torch.rand([]) < self.preconditioner_update_probability) or (self._Qs_exprs is None)):
             if self._Qs_exprs is None:
-                self._Qs_exprs = [init_Q_exprs(g, (torch.numel(g)/torch.sum(g*g.conj()))**0.25, self._preconditioner_max_size, self._preconditioner_max_skew) for g in grads]
+                # self._Qs_exprs = [init_Q_exprs(g, (torch.numel(g)/torch.sum(g*g.conj()))**0.25, self._preconditioner_max_size, self._preconditioner_max_skew) for g in grads]
+                self._Qs_exprs = [init_Q_exprs(g, None, self._preconditioner_max_size, self._preconditioner_max_skew) for g in grads]
             # update the preconditioner whitening the gradients 
             # [update_precond_kron_math_(*Q_exprs, torch.randn_like(g), g, self.lr_preconditioner, self.step_normalizer, self._tiny) for (Q_exprs, g) in zip(self._Qs_exprs, grads)]
             [update_precond_kron_math_(*Q_exprs, *damped_pair_vg(g), self.lr_preconditioner, self.step_normalizer, self._tiny) for (Q_exprs, g) in zip(self._Qs_exprs, grads)]
