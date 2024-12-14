@@ -38,6 +38,10 @@ Updates in 2024 Sept:
 Reverting update_precond_affine_dropv_math_ back to update_precond_affine_math_ for the PSGD affine whitening preconditioner.
 Integrating out v requires more accurate Lipschitz constant estimate of the preconditioner estimation criterion (nontrivial!).
 Add class Kron for Kronecker product preconditioner applicable to tensors with any dims. 
+
+Updates in 2024 Dec:
+Init Q on the fly to (torch.mean(v*v))**(1/4) * (torch.mean(h**4))**(-1/8) * I (less likely to overshoot).
+For the gradient whitening preconditioner, use damped pair (v, g + 2**(-13)*v) to address machine roundoff errors. 
 """
 
 import opt_einsum
@@ -873,7 +877,8 @@ class LRA:
             h = torch.cat([torch.reshape(h, [-1, 1]) for h in Hvs]) # column vector  
             # set self._d if it is None 
             if self._d is None:
-                self._d = (torch.sum(v*v)/torch.sum(h*h))**0.25 * torch.ones_like(v)
+                # self._d = (torch.sum(v*v)/torch.sum(h*h))**0.25 * torch.ones_like(v)
+                self._d = (torch.mean(v*v))**(1/4) * (torch.mean(h**4))**(-1/8) * torch.ones_like(v)
             # update self._U, _V and _d
             update_precond_UVd_math_(self._U, self._V, self._d, v, h, self.lr_preconditioner, self.step_normalizer, self._tiny)
             # if self.exact_hessian_vector_product:
@@ -896,7 +901,8 @@ class LRA:
         # update preconditioner here if it is the whitening type 
         if (self._preconditioner_type!="Newton") and ((torch.rand([]) < self.preconditioner_update_probability) or (self._d is None)):
             if self._d is None:
-                self._d = (len(grad)/torch.sum(grad*grad))**0.25 * torch.ones_like(grad)
+                # self._d = (len(grad)/torch.sum(grad*grad))**0.25 * torch.ones_like(grad)
+                self._d = (torch.mean(grad**4))**(-1/8) * torch.ones_like(grad)
             # update the preconditioner whitening the gradients  
             # v = torch.randn_like(grad)
             # update_precond_UVd_math_(self._U, self._V, self._d, v, grad, self.lr_preconditioner, self.step_normalizer, self._tiny)
@@ -1091,7 +1097,8 @@ class XMat:
             h = torch.cat([torch.flatten(h) for h in Hvs])
             # initialize self._a if it is None
             if self._a is None: 
-                self._a = (torch.sum(v*v)/torch.sum(h*h))**0.25 * torch.ones_like(v)
+                # self._a = (torch.sum(v*v)/torch.sum(h*h))**0.25 * torch.ones_like(v)
+                self._a = (torch.mean(v*v))**(1/4) * (torch.mean(h**4))**(-1/8) * torch.ones_like(v)
             # update self._a and self._b
             update_precond_Xmat_math_(self._a, self._b, v, h, self.lr_preconditioner, self.step_normalizer, self._tiny)
             # if self.exact_hessian_vector_product:
@@ -1115,7 +1122,8 @@ class XMat:
         # update preconditioner here if it is the whitening type 
         if (self._preconditioner_type!="Newton") and ((torch.rand([]) < self.preconditioner_update_probability) or (self._a is None)):
             if self._a is None:
-                self._a = (len(grad)/torch.sum(grad*grad))**0.25 * torch.ones_like(grad)
+                # self._a = (len(grad)/torch.sum(grad*grad))**0.25 * torch.ones_like(grad)
+                self._a = (torch.mean(grad**4))**(-1/8) * torch.ones_like(grad)
             # this preconditioner whitens the gradient 
             # v = torch.randn_like(grad)
             # update_precond_Xmat_math_(self._a, self._b, v, grad, self.lr_preconditioner, self.step_normalizer, self._tiny)
@@ -1322,7 +1330,8 @@ class Newton:
             h = torch.cat([torch.reshape(h, [-1, 1]) for h in Hvs]) 
             # initialize Q if it is None
             if self._Q is None:
-                scale = (torch.sum(v*v)/torch.sum(h*h))**0.25
+                # scale = (torch.sum(v*v)/torch.sum(h*h))**0.25
+                scale = (torch.mean(v*v))**(1/4) * (torch.mean(h**4))**(-1/8)
                 self._Q = scale * torch.eye(len(v), dtype=v.dtype, device=v.device)
                 if self._keep_invQ:
                     self._invQ = torch.eye(len(v), dtype=v.dtype, device=v.device) / scale 
@@ -1349,7 +1358,8 @@ class Newton:
         # update preconditioner here if it is the whitening type 
         if (self._preconditioner_type!="Newton") and ((torch.rand([]) < self.preconditioner_update_probability) or (self._Q is None)):
             if self._Q is None:
-                scale = (len(grad)/torch.sum(grad*grad))**0.25
+                # scale = (len(grad)/torch.sum(grad*grad))**0.25
+                scale = (torch.mean(grad**4))**(-1/8)
                 self._Q = scale * torch.eye(len(grad), dtype=grad.dtype, device=grad.device)
                 if self._keep_invQ:
                     self._invQ = torch.eye(len(grad), dtype=grad.dtype, device=grad.device) / scale 
@@ -1792,6 +1802,7 @@ class Affine:
             if p.dim() != 2:
                 print(f"FYI: expect 2D params; got {p.dim()}D with shape {p.shape} for the {i}th param; will reshape to {self._matrixizers[i][2]}")
                 # raise ValueError(f"expect 2D params (got {p.dim()}D param)")   
+        print("Affine is deprecated! Please switch to Kron.")
 
     @torch.no_grad()
     def step(self, closure):
@@ -1912,7 +1923,7 @@ def init_Q_exprs(t, Scale, max_size, max_skew):
         Q = Scale * I = Scale * kron(eye(t.shape[0]), eye(t.shape[1]), ...)
        where the eye(.) may be replaced with diag(ones(.)) if that dim is too large, determined by max_size and max_skew.
 
-       When Scale is None, we initialize Q similarly, but let it whiten t along its smallest dim. 
+       When Scale is None, we initialize Q similarly, but let it whiten t along its smallest dim (biased, no longer used). 
        
     2, A series of enisum contract expressions. The following subscript examples are for a 5th order tensor.  
         2.1, exprA is the expression for calculating A, e.g.,
@@ -1965,7 +1976,7 @@ def init_Q_exprs(t, Scale, max_size, max_skew):
             else:
                 # use triangular matrix as preconditioner for this dim 
                 Q.append(scale * torch.eye(size, dtype=t.dtype, device=t.device))
-                if size <= min_tri_size:
+                if size < min_tri_size:
                     min_tri_size, min_tri_loc = size, i
                 
                 piece1A.append(opt_einsum.get_symbol(i) + opt_einsum.get_symbol(i + 26))
@@ -1988,11 +1999,11 @@ def init_Q_exprs(t, Scale, max_size, max_skew):
                 t1 = t.transpose(min_tri_loc, 0)
                 t1 = t1.reshape(min_tri_size, -1)
                 D, U = torch.linalg.eigh(t1 @ t1.H)
-                D = torch.clamp(D, min=1e-6*torch.max(D))
+                D = torch.clamp(D, min=1e-4*torch.max(D))
                 _, R = torch.linalg.qr(U @ (U.H * torch.pow(D[:,None], -1/4)))
                 Q[min_tri_loc] = R * (R.diag().real.sign())[:,None]
-            else: # just let Q[min_tri_loc] normalize t 
-                Q[min_tri_loc] *= (1/torch.mean(t*t.conj()))**0.25
+            else: # just let Q[min_tri_loc] normalize t as normalizing a vector  
+                Q[min_tri_loc] *= (torch.linalg.vector_norm(t))**(-1/2)
         
         subscripts = ",".join(piece1A) + "," + piece2A + "->" + piece3A
         exprA = opt_einsum.contract_expression(subscripts, *[q.shape for q in Q], t.shape)
@@ -2115,7 +2126,7 @@ class Kron:
         
         Note 5: The scalar and tensor parameters to be optimized can be of different data types (real or complex, single or double, etc.). 
     """
-    def __init__(self,  params_with_grad, preconditioner_max_size=float("inf"), preconditioner_max_skew=10.0, preconditioner_init_scale=None,
+    def __init__(self,  params_with_grad, preconditioner_max_size=float("inf"), preconditioner_max_skew=1.0, preconditioner_init_scale=None,
                         lr_params=None, lr_preconditioner=None, momentum=0.0,
                         grad_clip_max_norm=None, preconditioner_update_probability=1.0,
                         step_normalizer='2nd',
@@ -2196,7 +2207,8 @@ class Kron:
             # initialize Qs if it is None 
             if self._Qs_exprs is None:
                 # self._Qs_exprs = [init_Q_exprs(v, (torch.sum(v*v.conj())/torch.sum(h*h.conj()))**0.25, self._preconditioner_max_size, self._preconditioner_max_skew) for (v, h) in zip(vs, Hvs)]
-                self._Qs_exprs = [init_Q_exprs(h*torch.rsqrt(torch.mean(v*v.conj())), None, self._preconditioner_max_size, self._preconditioner_max_skew) for (v, h) in zip(vs, Hvs)]
+                # self._Qs_exprs = [init_Q_exprs(h*torch.rsqrt(torch.mean(v*v.conj())), None, self._preconditioner_max_size, self._preconditioner_max_skew) for (v, h) in zip(vs, Hvs)]
+                self._Qs_exprs = [init_Q_exprs(h, (torch.mean((torch.abs(v))**2))**(1/4) * (torch.mean((torch.abs(h))**4))**(-1/8), self._preconditioner_max_size, self._preconditioner_max_skew) for (v, h) in zip(vs, Hvs)]
             # update self._Qs
             [update_precond_kron_math_(*Q_exprs, v, h, self.lr_preconditioner, self.step_normalizer, self._tiny) for (Q_exprs, v, h) in zip(self._Qs_exprs, vs, Hvs)]
         else:
@@ -2211,7 +2223,8 @@ class Kron:
         if (self._preconditioner_type!="Newton") and ((torch.rand([]) < self.preconditioner_update_probability) or (self._Qs_exprs is None)):
             if self._Qs_exprs is None:
                 # self._Qs_exprs = [init_Q_exprs(g, (torch.numel(g)/torch.sum(g*g.conj()))**0.25, self._preconditioner_max_size, self._preconditioner_max_skew) for g in grads]
-                self._Qs_exprs = [init_Q_exprs(g, None, self._preconditioner_max_size, self._preconditioner_max_skew) for g in grads]
+                # self._Qs_exprs = [init_Q_exprs(g, None, self._preconditioner_max_size, self._preconditioner_max_skew) for g in grads]
+                self._Qs_exprs = [init_Q_exprs(g, (torch.mean((torch.abs(g))**4))**(-1/8), self._preconditioner_max_size, self._preconditioner_max_skew) for g in grads]
             # update the preconditioner whitening the gradients 
             # [update_precond_kron_math_(*Q_exprs, torch.randn_like(g), g, self.lr_preconditioner, self.step_normalizer, self._tiny) for (Q_exprs, g) in zip(self._Qs_exprs, grads)]
             [update_precond_kron_math_(*Q_exprs, *damped_pair_vg(g), self.lr_preconditioner, self.step_normalizer, self._tiny) for (Q_exprs, g) in zip(self._Qs_exprs, grads)]
