@@ -3,10 +3,26 @@
 ### An overview
 PSGD (Preconditioned SGD) is a general purpose (mathematical and stochastic, convex and nonconvex) 2nd order optimizer. It reformulates a wide range of preconditioner estimation and Hessian fitting problems as a family of strongly convex Lie group optimization problems. 
 
-Notations: $E_z[\ell(\theta, z)]$ or $\ell(\theta)$ the loss;  $g$ the (stochastic) gradient wrt $\theta$; $H$ the Hessian;  $h=Hv$ the Hessian-vector product with ${v\sim\mathcal{N}(0,I)}$; $P=Q^TQ$ the preconditioner applying on $g$; ${\rm tri}$ takes the upper or lower triangular part of a matrix; $\lVert \cdot \rVert$ takes spectral norm; superscripts $^T$, $^*$ and $^H$ for transpose, conjugate and Hermitian transpose, respectively.
+Notations: $E_z[\ell(\theta, z)]$ or $\ell(\theta)$ the loss;  $g$ the (stochastic) gradient wrt $\theta$; $H$ the Hessian;  $h=Hv$ the Hessian-vector product (Hvp) with ${v\sim\mathcal{N}(0,I)}$; $P=Q^TQ$ the preconditioner applying on $g$; ${\rm tri}$ takes the upper or lower triangular part of a matrix; $\lVert \cdot \rVert$ takes spectral norm; superscripts $^T$, $^*$ and $^H$ for transpose, conjugate and Hermitian transpose, respectively.
 <!---; $[I+A]_R\approx I + {\rm triu}(A) + {\rm triu}(A,1)$ for $\|\|A\|\| < 1$, where $[\cdot]_R$ keeps $R$ of a QR decomposition.--->
 
-#### Table I: Variations of preconditioner fitting criterion
+The PSGD theory has two orthogonal parts: criteria for preconditioner fitting and preconditioner fitting in Lie groups. 
+
+#### Criteria for preconditioner fitting 
+
+PSGD was originally designed for preconditioning the gradient such that metrics of the spaces of preconditioned gradient and parameters are matched, i.e., $E_{\delta \theta}[(P\delta g)(P\delta g)^T] = E_{\delta \theta}[\delta \theta \delta \theta^T]$, where $\delta$ denotes the perturbation operation and $P$ is symmetric positive definite (SPD). This leads to the original preconditioner fitting criterion $E_{\delta\theta}[\delta g^T P \delta g + \delta \theta P^{-1} \delta \theta]$ [ref](https://arxiv.org/abs/1512.04202). The notation may be not common. But, note that PSGD was invented before popular automatic differentiation (AD) tools like Tensorflow. Manually calculating the Hvp was cubersome then. With AD, we can simply replace pair $(\delta \theta, \delta g)$ with $(v, h)$. For the gradient whitening preconditioner, we just replace pair $(\delta \theta, \delta g)$ with $(v, g)$ and the same form of math applies [ref](https://arxiv.org/abs/1809.10232). Thus, it's trivial to switch between these two types of preconditioners with little code change. 
+
+#### Preconditioner fitting in Lie groups
+
+The above preconditioner fitting criteria are always convex in the Euclidean space, the manifold of SPD matrices and the Lie groups. But, they are *strongly* convex only in the Lie groups [ref](https://arxiv.org/abs/2402.11858). The $Q$ here defines the coordinate transform $\vartheta=Q^{-T}\theta$ such that PSGD reduces to an SGD for $\vartheta$. Lie group is a natural tool for this purpose. There are virtually endless choices for the group forms of $Q$, say the Kronecker product preconditioner [ref](https://arxiv.org/abs/1512.04202), the affine Lie group [ref](https://arxiv.org/abs/1809.10232), and the low rank approximation (LRA) group [ref](https://arxiv.org/abs/2211.04422). 
+
+#### Tips for numerical stability 
+
+*Damping*. When the Hvp is used for preconditioner fitting, $P$ eventually converges to $H^{-1}$. Adding a small $L2$ regularization term, $0.5 \lambda \theta^T \theta$, to the loss $\ell(\theta)$ can lower bound the Hessian as $H\succeq \lambda I$. For the gradient whitening preconditioner, $P$ eventually converges to $(E[g^Tg])^{-0.5}$. Adding a tiny bit of Gaussian noise, $v \sim \mathcal{N}(0, \lambda I)$, to $g$ also can lower bound $E[g^Tg]$ as $E[g^Tg]\succeq \lambda I$. How much damping is needed mainly depends on the machine precisions ([demo](https://github.com/lixilinx/psgd_torch/blob/master/misc/psgd_with_finite_precision_arithmetic.py)).
+
+*Trust region*. We may need to clip or shrink the norm of the preconditioned gradient $Pg$ to limit $\Delta \theta$ with a given learning rate (lr). How much clipping is needed depends on the size of lr and the roughness of the landscape of $\ell(\theta)$. In machine learning (ML), this practice is known as gradient clipping, and typically clipping $Pg$ element-wisely or layer-wisely.      
+
+#### Table I: Implemented variations of preconditioner fitting criterion
   
 | Criterion | Solution | Notes |
 |--------------|------------------|-------|
