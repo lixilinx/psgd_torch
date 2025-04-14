@@ -1915,15 +1915,16 @@ class Affine:
 #   
 #
 
-def init_Q_exprs(t, Scale, max_size, max_skew):
+def init_kron_states_exprs(t, Scale=1.0, max_size=float("inf"), max_skew=float("inf")):
     """
-    For a scalar or tensor t, we initialize its preconditioner Q and reusable contraction expressions for updating Q and preconditioning gradient.
+    For a scalar or tensor t, we initialize its states (preconditioner Q and Lipschitz constant L), 
+    and reusable contraction expressions for updating Q and preconditioning gradient.
     
-    1, When Scale is not None, preconditioner Q is initialized to 
+    1, The preconditioner Q is initialized to 
         Q = Scale * I = Scale * kron(eye(t.shape[0]), eye(t.shape[1]), ...)
        where the eye(.) may be replaced with diag(ones(.)) if that dim is too large, determined by max_size and max_skew.
-
-       When Scale is None, we initialize Q similarly, but let it whiten t along its smallest dim (biased, no longer used). 
+       
+       The Lipschitz constant L is initialized to zero. 
        
     2, A series of enisum contract expressions. The following subscript examples are for a 5th order tensor.  
         2.1, exprA is the expression for calculating A, e.g.,
@@ -1936,8 +1937,8 @@ def init_Q_exprs(t, Scale, max_size, max_skew):
     """
     shape = t.shape 
     if len(shape)==0: # scalar 
-        scale = Scale if Scale else (1/(t*t.conj()))**0.25
-        Q = [scale * torch.ones_like(t),]
+        Q = [Scale * torch.ones_like(t),]
+        L = [torch.zeros_like(t.real),]
         exprA = opt_einsum.contract_expression(",->", Q[0].shape, t.shape)
         exprP = opt_einsum.contract_expression(",,->", Q[0].shape, Q[0].shape, t.shape) 
         exprGs = [opt_einsum.contract_expression(",->", t.shape, t.shape),]
@@ -1945,18 +1946,14 @@ def init_Q_exprs(t, Scale, max_size, max_skew):
         if len(shape) > 26:
             raise ValueError(f"Got tensor with dim {len(t.shape)}; Einstein runs out of letters; Replace 26 with larger numbers!")   
             
-        scale = Scale ** (1/len(shape)) if Scale else 1.0 # will correct scale later if Scale is None
-        # if len(shape) == 1:
-        #     beta_size = 1 # 2nd largest size 
-        # else:
-        #     beta_size = sorted(list(shape))[-2]
+        scale = Scale ** (1/len(shape)) 
     
-        Q = []
+        Q, L = [], []
         exprGs = []
         piece1A, piece2A, piece3A = [], "", "" # used for getting the subscripts for exprA
         piece1P, piece2P, piece3P, piece4P = [], [], "", "" # used for getting the subscripts for exprP
-        min_tri_size, min_tri_loc = float("inf"), 0 # bookkeep the smallest tri Q info 
         for i, size in enumerate(shape):
+            L.append(torch.zeros([], dtype=t.real.dtype, device=t.device))
             if size == 1 or size > max_size or size**2 > max_skew * t.numel():
                 # use diagonal matrix as preconditioner for this dim 
                 Q.append(scale * torch.ones(size, dtype=t.dtype, device=t.device))
@@ -1976,8 +1973,6 @@ def init_Q_exprs(t, Scale, max_size, max_skew):
             else:
                 # use triangular matrix as preconditioner for this dim 
                 Q.append(scale * torch.eye(size, dtype=t.dtype, device=t.device))
-                if size < min_tri_size:
-                    min_tri_size, min_tri_loc = size, i
                 
                 piece1A.append(opt_einsum.get_symbol(i) + opt_einsum.get_symbol(i + 26))
                 piece2A = piece2A + opt_einsum.get_symbol(i + 26)
@@ -1993,17 +1988,6 @@ def init_Q_exprs(t, Scale, max_size, max_skew):
                 piece2 = "".join([opt_einsum.get_symbol(i+805) if j==i else opt_einsum.get_symbol(j) for j in range(len(shape))])
                 subscripts = piece1 + "," + piece2 + "->" + opt_einsum.get_symbol(i+26) + opt_einsum.get_symbol(i+805)
                 exprGs.append(opt_einsum.contract_expression(subscripts, t.shape, t.shape))
-
-        if Scale is None: # correct the scale 
-            if min_tri_size**2 <= t.numel(): # let Q[min_tri_loc] whitens t
-                t1 = t.transpose(min_tri_loc, 0)
-                t1 = t1.reshape(min_tri_size, -1)
-                D, U = torch.linalg.eigh(t1 @ t1.H)
-                D = torch.clamp(D, min=1e-4*torch.max(D))
-                _, R = torch.linalg.qr(U @ (U.H * torch.pow(D[:,None], -1/4)))
-                Q[min_tri_loc] = R * (R.diag().real.sign())[:,None]
-            else: # just let Q[min_tri_loc] normalize t as normalizing a vector  
-                Q[min_tri_loc] *= (torch.linalg.vector_norm(t))**(-1/2)
         
         subscripts = ",".join(piece1A) + "," + piece2A + "->" + piece3A
         exprA = opt_einsum.contract_expression(subscripts, *[q.shape for q in Q], t.shape)
@@ -2012,16 +1996,18 @@ def init_Q_exprs(t, Scale, max_size, max_skew):
         exprP = opt_einsum.contract_expression(subscripts, *[q.shape for q in Q], *[q.shape for q in Q], t.shape)
     
     exprGs = tuple(exprGs)
-    return [Q, (exprA, exprGs, exprP)]
+    return [[Q, L], (exprA, exprGs, exprP)]
 
 
-def update_precond_kron_math_(Q, exprs, V, G, step, step_normalizer, tiny):
+def update_precond_kron_math_(QL, exprs, V, G, step=0.1, step_normalizer="2nd", tiny=0.0):
     """
-    Update Kronecker product preconditioner Q with (vector, hess-vector-product) pair (V, G). 
-    V is optional, and we can set it to None if it is integrated out (NOT recommend).  
+    Update Kronecker product preconditioner Q and Lipschitz constant L with (vector, hess-vector-product) pair (V, G). 
+    V is optional, and we can set it to None if it is integrated out.  
     """
+    Q, L = QL
+    
     def triangular_inv(A):
-        # return inv(A); used only when V is None, i.e., integrating out V; NOT recommend. 
+        # return inv(A); used only when V is None, i.e., integrating out V. 
         I = torch.eye(A.shape[0], dtype=A.dtype, device=A.device)
         return torch.linalg.solve_triangular(A, I, upper=True)
     
@@ -2066,25 +2052,30 @@ def update_precond_kron_math_(Q, exprs, V, G, step, step_normalizer, tiny):
             for j, trace in enumerate(trace_invQhinvQ):
                 term2 = term2 * (trace if i!=j else invQhinvQ[i])
         
-        if step_normalizer == "2nd":              
+        if step_normalizer == "2nd": # use Lipschitz estimate to normalize step size               
             if q.dim() < 2: # q is a diagonal matrix or scalar 
-                q.sub_(step/(torch.max(torch.abs(term1 + term2)) + tiny) * (term1 - term2) * q)      
+                ell = torch.max(torch.abs(term1 + term2))
+                L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
+                q.sub_(step/(L[i] + tiny) * (term1 - term2) * q)      
             else: 
-                q.sub_(step/(norm_lower_bound(term1 + term2) + tiny) * torch.triu(term1 - term2) @ q)
+                ell = norm_lower_bound(term1 + term2)
+                L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
+                q.sub_(step/(L[i] + tiny) * torch.triu(term1 - term2) @ q)
         else: # only use gradient for step size normalization 
             if q.dim() < 2: # q is a diagonal matrix or scalar
-                q.sub_(step/(torch.max(torch.abs(term1 - term2)) + tiny) * (term1 - term2) * q)    
+                grad = term1 - term2
+                q.sub_(step/(torch.max(torch.abs(grad)) + tiny) * grad * q)    
             else:
-                # q.sub_(step/(norm_lower_bound(term1 - term2) + tiny) * torch.triu(term1 - term2) @ q) 
                 grad = torch.triu(term1 - term2)
                 q.sub_(step/(norm_lower_bound(grad) + tiny) * grad @ q)
                 
               
-def precond_grad_kron_math(Q, exprs, G):
+def precond_grad_kron_math(QL, exprs, G):
     """
     Precondition gradient G with preconditioner Q. 
     """
-    return exprs[-1](*[q.conj() for q in Q], *Q, G) # the last expr is exprP
+    Q, exprP = QL[0], exprs[-1]
+    return exprP(*[q.conj() for q in Q], *Q, G) 
 
 
 class Kron:
@@ -2121,8 +2112,7 @@ class Kron:
         Note 3: Momentum here is the moving average of gradient so that its setting is decoupled from the learning rate.
         This is necessary as the learning rate in PSGD is normalized.    
         
-        Note 4: lr_params, lr_preconditioner, momentum, grad_clip_max_norm, preconditioner_update_probability, and 
-        exact_hessian_vector_product (bool) all can be reset on the fly. 
+        Note 4: lr_params, lr_preconditioner, momentum, grad_clip_max_norm, and preconditioner_update_probability all can be reset on the fly. 
         
         Note 5: The scalar and tensor parameters to be optimized can be of different data types (real or complex, single or double, etc.). 
     """
@@ -2150,9 +2140,9 @@ class Kron:
         self.momentum = momentum if (0<momentum<1) else 0.0
         self.grad_clip_max_norm = grad_clip_max_norm
         self.preconditioner_update_probability = preconditioner_update_probability
-        self.exact_hessian_vector_product = exact_hessian_vector_product
         self.step_normalizer = step_normalizer
         # protected members
+        self._exact_hessian_vector_product = exact_hessian_vector_product
         self._preconditioner_max_size = preconditioner_max_size
         self._preconditioner_max_skew = preconditioner_max_skew
         params_with_grad = [params_with_grad,] if isinstance(params_with_grad, torch.Tensor) else params_with_grad
@@ -2160,10 +2150,10 @@ class Kron:
         self._tiny = max([torch.finfo(p.dtype).tiny for p in self._params_with_grad])
         self._delta_param_scale = (max([torch.finfo(p.dtype).eps for p in self._params_with_grad])) ** 0.5
         if preconditioner_init_scale is None:
-            self._Qs_exprs = None # initialize on the fly 
+            self._QLs_exprs = None # initialize on the fly 
             print("FYI: Will set the preconditioner initial scale on the fly. Highly recommend to set it manually!")
         else:
-            self._Qs_exprs = [init_Q_exprs(p, preconditioner_init_scale, preconditioner_max_size, preconditioner_max_skew) for p in self._params_with_grad]
+            self._QLs_exprs = [init_kron_states_exprs(p, preconditioner_init_scale, preconditioner_max_size, preconditioner_max_skew) for p in self._params_with_grad]
         self._ms = None # momentum buffers 
         self._preconditioner_type = preconditioner_type
 
@@ -2176,13 +2166,13 @@ class Kron:
 
         Args:
             closure (callable): a (stateless) closure that evaluates the function of self._params_with_grad,
-                                and returns the loss, or an iterable with the first one being loss.
+                                and returns the loss, or an iterable with the first one being the loss.
                                 Random numbers, if any, used inside the closure should be generated starting 
                                 from the same rng state if exact_hessian_vector_product=False and preconditioner_type="Newton". 
         """
-        if (self._preconditioner_type=="Newton") and ((torch.rand([]) < self.preconditioner_update_probability) or (self._Qs_exprs is None)):
+        if (self._preconditioner_type=="Newton") and ((torch.rand([]) < self.preconditioner_update_probability) or (self._QLs_exprs is None)):
             # evaluates gradients, Hessian-vector product, and updates the preconditioner
-            if self.exact_hessian_vector_product:
+            if self._exact_hessian_vector_product:
                 # exact Hessian-vector product
                 with torch.enable_grad():
                     closure_returns = closure()
@@ -2191,7 +2181,7 @@ class Kron:
                     vs = [torch.randn_like(p) for p in self._params_with_grad]
                     Hvs = torch.autograd.grad(grads, self._params_with_grad, vs) # this line also works for complex matrices 
             else:
-                # approximate Hessian-vector product via finite-difference formulae. Use it with cautions.
+                # approximate the Hessian-vector product via finite-difference formulae. Use it with cautions.
                 with torch.enable_grad():
                     closure_returns = closure()
                     loss = closure_returns if isinstance(closure_returns, torch.Tensor) else closure_returns[0]
@@ -2203,31 +2193,29 @@ class Kron:
                     perturbed_loss = perturbed_returns if isinstance(perturbed_returns, torch.Tensor) else perturbed_returns[0]
                     perturbed_grads = torch.autograd.grad(perturbed_loss, self._params_with_grad)
                 Hvs = [perturbed_g - g for (perturbed_g, g) in zip(perturbed_grads, grads)]
+                [p.sub_(v) for (p, v) in zip(self._params_with_grad, vs)] # simpler to remove perturbation here (Yang Gao)
             # update preconditioner 
-            # initialize Qs if it is None 
-            if self._Qs_exprs is None:
-                # self._Qs_exprs = [init_Q_exprs(v, (torch.sum(v*v.conj())/torch.sum(h*h.conj()))**0.25, self._preconditioner_max_size, self._preconditioner_max_skew) for (v, h) in zip(vs, Hvs)]
-                # self._Qs_exprs = [init_Q_exprs(h*torch.rsqrt(torch.mean(v*v.conj())), None, self._preconditioner_max_size, self._preconditioner_max_skew) for (v, h) in zip(vs, Hvs)]
-                self._Qs_exprs = [init_Q_exprs(h, (torch.mean((torch.abs(v))**2))**(1/4) * (torch.mean((torch.abs(h))**4))**(-1/8), self._preconditioner_max_size, self._preconditioner_max_skew) for (v, h) in zip(vs, Hvs)]
-            # update self._Qs
-            [update_precond_kron_math_(*Q_exprs, v, h, self.lr_preconditioner, self.step_normalizer, self._tiny) for (Q_exprs, v, h) in zip(self._Qs_exprs, vs, Hvs)]
+            # initialize QLs if it is None 
+            if self._QLs_exprs is None:
+                self._QLs_exprs = [init_kron_states_exprs(h, (torch.mean((torch.abs(v))**2))**(1/4) * (torch.mean((torch.abs(h))**4))**(-1/8), 
+                                                          self._preconditioner_max_size, self._preconditioner_max_skew) for (v, h) in zip(vs, Hvs)]
+            # update QLs
+            [update_precond_kron_math_(*QL_exprs, v, h, self.lr_preconditioner, self.step_normalizer, self._tiny) for (QL_exprs, v, h) in zip(self._QLs_exprs, vs, Hvs)]
         else:
             # only evaluates the gradients
             with torch.enable_grad():
                 closure_returns = closure()
                 loss = closure_returns if isinstance(closure_returns, torch.Tensor) else closure_returns[0]
                 grads = torch.autograd.grad(loss, self._params_with_grad)
-            vs = None # no vs and Hvs
         
         # update preconditioner here if it is the whitening type 
-        if (self._preconditioner_type!="Newton") and ((torch.rand([]) < self.preconditioner_update_probability) or (self._Qs_exprs is None)):
-            if self._Qs_exprs is None:
-                # self._Qs_exprs = [init_Q_exprs(g, (torch.numel(g)/torch.sum(g*g.conj()))**0.25, self._preconditioner_max_size, self._preconditioner_max_skew) for g in grads]
-                # self._Qs_exprs = [init_Q_exprs(g, None, self._preconditioner_max_size, self._preconditioner_max_skew) for g in grads]
-                self._Qs_exprs = [init_Q_exprs(g, (torch.mean((torch.abs(g))**4))**(-1/8), self._preconditioner_max_size, self._preconditioner_max_skew) for g in grads]
-            # update the preconditioner whitening the gradients 
-            # [update_precond_kron_math_(*Q_exprs, torch.randn_like(g), g, self.lr_preconditioner, self.step_normalizer, self._tiny) for (Q_exprs, g) in zip(self._Qs_exprs, grads)]
-            [update_precond_kron_math_(*Q_exprs, *damped_pair_vg(g), self.lr_preconditioner, self.step_normalizer, self._tiny) for (Q_exprs, g) in zip(self._Qs_exprs, grads)]
+        if (self._preconditioner_type!="Newton") and ((torch.rand([]) < self.preconditioner_update_probability) or (self._QLs_exprs is None)):
+            if self._QLs_exprs is None:
+                self._QLs_exprs = [init_kron_states_exprs(g, (torch.mean((torch.abs(g))**4))**(-1/8), 
+                                                          self._preconditioner_max_size, self._preconditioner_max_skew) for g in grads]
+            # update the gradient whitening preconditioner 
+            [update_precond_kron_math_(*QL_exprs, *damped_pair_vg(g), self.lr_preconditioner, self.step_normalizer, self._tiny) 
+             for (QL_exprs, g) in zip(self._QLs_exprs, grads)]
 
         # preconditioned gradients; momentum is optional      
         if self.momentum > 0:
@@ -2235,10 +2223,10 @@ class Kron:
                 self._ms = [(1 - self.momentum)*g for g in grads]
             else:
                 [m.mul_(self.momentum).add_(g, alpha=1 - self.momentum) for (m, g) in zip(self._ms, grads)]
-            pre_grads = [precond_grad_kron_math(*Q_exprs, m) for (Q_exprs, m) in zip(self._Qs_exprs, self._ms)]
+            pre_grads = [precond_grad_kron_math(*QL_exprs, m) for (QL_exprs, m) in zip(self._QLs_exprs, self._ms)]
         else:
             self._ms = None # clean the buffer when momentum is set to zero 
-            pre_grads = [precond_grad_kron_math(*Q_exprs, g) for (Q_exprs, g) in zip(self._Qs_exprs, grads)]
+            pre_grads = [precond_grad_kron_math(*QL_exprs, g) for (QL_exprs, g) in zip(self._QLs_exprs, grads)]
             
         # gradient clipping is optional
         if self.grad_clip_max_norm is None:
@@ -2247,11 +2235,8 @@ class Kron:
             grad_norm = torch.sqrt(torch.abs(sum([torch.sum(g*g.conj()) for g in pre_grads]))) + self._tiny
             lr = self.lr_params * min(self.grad_clip_max_norm/grad_norm, 1.0)
             
-        # update the parameters
-        if self.exact_hessian_vector_product or (vs is None) or (self._preconditioner_type!="Newton"):
-            [param.subtract_(lr*g) for (param, g) in zip(self._params_with_grad, pre_grads)]
-        else: # in this case, do not forget to remove the perturbation on parameters
-            [param.subtract_(lr*g + v) for (param, g, v) in zip(self._params_with_grad, pre_grads, vs)]        
+        # Update the parameters. If the finite-difference method is used, its perturbation already removed.   
+        [param.subtract_(lr*g) for (param, g) in zip(self._params_with_grad, pre_grads)]
         
         # return whatever closure returns
         return closure_returns
