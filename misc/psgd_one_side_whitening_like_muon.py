@@ -4,7 +4,7 @@ sys.path.append("..")
 from preconditioned_stochastic_gradient_descent import norm_lower_bound
 
 
-def muon_style_psgd(G, GhG, Q, lr_preconditioner=1.0, preconditioner_update_probability=1.0):
+def muon_style_psgd(G, GhG, Q, lr_preconditioner=0.05, preconditioner_update_probability=1.0):
     """
     The muon style PSGD fits the preconditioner in Lie group kron(Q2=Q, Q1=I) for a tall matrix gradient G, 
     and group kron(Q2=I, Q1=Q) for a short matrix gradient G. 
@@ -31,14 +31,12 @@ def muon_style_psgd(G, GhG, Q, lr_preconditioner=1.0, preconditioner_update_prob
     if Q is None:
         Q = torch.eye(n, device=G.device) * (n/torch.trace(GhG))**0.25
         
-    if torch.rand([]) < preconditioner_update_probability:
-        invQ = torch.linalg.solve_triangular(Q, torch.eye(n, device=G.device), upper=True)
-        invQhinvQ = invQ.H @ invQ
-        AhA = Q @ GhG @ Q.H # A is G @ Q.H
-        lr = lr_preconditioner/norm_lower_bound(AhA + invQhinvQ)
-        Q = Q - lr * torch.triu(AhA - invQhinvQ) @ Q  
-    
     precondG = G @ Q.H @ Q
+    if torch.rand([]) < preconditioner_update_probability:
+        PGhGP = precondG.H @ precondG
+        lr = lr_preconditioner/(norm_lower_bound(PGhGP) + 1)
+        Q = (1 + lr) * Q - lr * PGhGP @ Q  
+    
     if transposed:
         return (precondG.H, GhG, Q)
     else:
