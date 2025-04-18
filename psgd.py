@@ -19,6 +19,15 @@ def norm_lower_bound_herm(A):
     
 ###############################################################################
 #               The Kronecker product preconditioner
+#
+# In the Lie group, I choose dQ = \mathcal{E} Q, and Q is updated as 
+# 
+#   dQ = - lr * (P*h*h^T*P - v*v^T) * Q
+# 
+# after applying another preconditioner kron(Q^T, Q^T) on \mathcal{E}. 
+# It's less stable than update dQ = - lr * Q * (P*h*h^T*P - v*v^T) derived with 
+# dQ = Q \mathcal{E}, but faster, and also can be easily fixed by dropping the 
+# 'phase' part of the polar decomposition of Q every a while. 
 
 
 def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0):
@@ -90,24 +99,45 @@ def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0):
     return [[Q, L], (exprP, exprGs)]
 
 
-def precond_grad_kron_whiten(QL, exprs, G, lr=0.02, updateP=True):
+def cond_kron_precond(Q):
+    """
+    Numerically condition the kron product preconditioner Q by:
+        1, balance the dynamic range of factors of Q.
+        2, remove the 'phase' parts of the polar decompositions of Q.
+    """
+    # balance the dynamic range of Q if there are more than one factors 
+    order = len(Q)  # order of tensor or the number of factors in Q 
+    if order>1:
+        norms = [torch.max(torch.abs(q)) for q in Q]
+        gmean = (torch.cumprod(torch.stack(norms), dim=0)[-1])**(1/order) # geometric mean 
+        for i, q in enumerate(Q):
+            q.mul_(gmean/norms[i]) 
+            
+    # remove the 'phase' parts of the polar decompositions of Q
+    for q in Q:
+        if q.dim() > 1:
+            X = q/torch.linalg.vector_norm(q)
+            for i in range(100):
+                A = X @ X.H     # A should be close to I when converged 
+                X = 3 * X + (-16/5 * A + 6/5 * A @ A) @ X
+                if torch.max(abs(torch.triu(A, 1))) < 1e-5 and torch.max(abs(torch.diag(A) - 1)) < 1e-5:
+                    q.data = X.H @ q
+                    break
+            else:  
+                print("Fail to cond Q with polar decomposition using Newton-Schulz iteration!")
+
+
+def precond_grad_kron_whiten(QL, exprs, G, lr=0.02, updateP=True, condQ=False):
     """
     Precondition gradient G with Kron product whitening preconditioner Q. 
-    We just optionally update the preconditioner here to save some computations. 
+    We just optionally update the preconditioner here to save the computations. 
     """   
     Q, L = QL
     exprP, exprGs = exprs
     G = exprP(*[q.conj() for q in Q], *Q, G) 
     
     if updateP:
-        order = G.dim() # order of tensor 
-        if order>1 and torch.rand([])<0.01:
-            # balance the dynamic range of Q if there are more than one factors 
-            norms = [torch.max(torch.abs(q)) for q in Q]
-            gmean = (torch.cumprod(torch.stack(norms), dim=0)[-1])**(1/order) # geometric mean 
-            for i, q in enumerate(Q):
-                q.mul_(gmean/norms[i]) 
-    
+        # update P
         total_numel = G.numel() 
         for i, q in enumerate(Q):
             GGc = exprGs[i](G, G.conj())
@@ -121,6 +151,10 @@ def precond_grad_kron_whiten(QL, exprs, G, lr=0.02, updateP=True):
                 ell = norm_lower_bound_herm(GGc) + target_scale
                 L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
                 q.sub_(lr/L[i] * (GGc @ q - target_scale*q))
+                
+        # cond Q
+        if condQ:
+            cond_kron_precond(Q)
                     
     return G
                     
@@ -153,8 +187,9 @@ class KronWhiten:
         else:
             self._QLs_exprs = [init_kron(p, preconditioner_init_scale, preconditioner_max_size, preconditioner_max_skew) for p in self._params_with_grad]
         self._ms = None # momentum buffers 
-        self._counter = 0 # counter for momentum 
         self._whiten_grad = whiten_grad # set to False to whiten momentum. 
+        self._counter_m = 0 # counter for momentum 
+        self._counter_Q = 0 # counter for Q 
 
 
     @torch.no_grad()
@@ -173,22 +208,26 @@ class KronWhiten:
             
         # preconditioned gradients; momentum is optional    
         updateP = torch.rand([]) < self.preconditioner_update_probability
+        condQ = False
+        if updateP:
+            self._counter_Q += 1
+            condQ = (self._counter_Q % 1000 == 0)
         if self.momentum > 0:
-            beta = min(self._counter/(1 + self._counter), self.momentum)
-            self._counter += 1
+            beta = min(self._counter_m/(1 + self._counter_m), self.momentum)
+            self._counter_m += 1
             if self._ms is None:
                 self._ms = [torch.zeros_like(g) for g in grads]
                 
             if self._whiten_grad: # whiten the gradient 
-                pre_grads = [precond_grad_kron_whiten(*QL_exprs, g, self.lr_preconditioner, updateP) for (QL_exprs, g) in zip(self._QLs_exprs, grads)]
+                pre_grads = [precond_grad_kron_whiten(*QL_exprs, g, self.lr_preconditioner, updateP, condQ) for (QL_exprs, g) in zip(self._QLs_exprs, grads)]
                 [m.mul_(beta).add_(g, alpha=1 - beta) for (m, g) in zip(self._ms, pre_grads)]
                 pre_grads = self._ms
             else: # whiten the momentum 
                 [m.mul_(beta).add_(g, alpha=1 - beta) for (m, g) in zip(self._ms, grads)]
-                pre_grads = [precond_grad_kron_whiten(*QL_exprs, m, self.lr_preconditioner, updateP) for (QL_exprs, m) in zip(self._QLs_exprs, self._ms)]
+                pre_grads = [precond_grad_kron_whiten(*QL_exprs, m, self.lr_preconditioner, updateP, condQ) for (QL_exprs, m) in zip(self._QLs_exprs, self._ms)]
         else:
-            self._ms, self._counter = None, 0 # clean the buffer and counter when momentum is set to zero 
-            pre_grads = [precond_grad_kron_whiten(*QL_exprs, g, self.lr_preconditioner, updateP) for (QL_exprs, g) in zip(self._QLs_exprs, grads)]
+            self._ms, self._counter_m = None, 0 # clean the buffer and counter when momentum is set to zero 
+            pre_grads = [precond_grad_kron_whiten(*QL_exprs, g, self.lr_preconditioner, updateP, condQ) for (QL_exprs, g) in zip(self._QLs_exprs, grads)]
             
         # gradient clipping is optional
         if self.grad_clip_max_norm is None:
@@ -204,22 +243,15 @@ class KronWhiten:
         return closure_returns
     
     
-def update_precond_kron_newton(QL, exprs, V, Hvp, lr=0.05):
+def update_precond_kron_newton(QL, exprs, V, Hvp, lr=0.05, condQ=False):
     """
     Update the Kron product Newton preconditioner with a pair of vector and hvp, (V, Hvp). 
     """   
     Q, L = QL
     exprP, exprGs = exprs
     Hvp = exprP(*[q.conj() for q in Q], *Q, Hvp) 
-    
-    order = Hvp.dim() # order of tensor 
-    if order>1 and torch.rand([])<0.01:
-        # balance the dynamic range of Q if there are more than one factors 
-        norms = [torch.max(torch.abs(q)) for q in Q]
-        gmean = (torch.cumprod(torch.stack(norms), dim=0)[-1])**(1/order) # geometric mean 
-        for i, q in enumerate(Q):
-            q.mul_(gmean/norms[i]) 
 
+    # update P 
     for i, q in enumerate(Q):
         HHc = exprGs[i](Hvp, Hvp.conj())
         VVc = exprGs[i](V, V.conj())
@@ -231,6 +263,10 @@ def update_precond_kron_newton(QL, exprs, V, Hvp, lr=0.05):
             ell = norm_lower_bound_herm(HHc + VVc) 
             L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
             q.sub_(lr/L[i] * (HHc - VVc) @ q)
+    
+    # condition Q 
+    if condQ:
+        cond_kron_precond(Q)
                     
             
 def precond_grad_kron_newton(QL, exprs, G):
@@ -271,7 +307,8 @@ class KronNewton:
         else:
             self._QLs_exprs = [init_kron(p, preconditioner_init_scale, preconditioner_max_size, preconditioner_max_skew) for p in self._params_with_grad]
         self._ms = None # momentum buffers 
-        self._counter = 0 # counter for momentum 
+        self._counter_m = 0 # counter for momentum 
+        self._counter_Q = 0 # counter for Q 
 
 
     @torch.no_grad()
@@ -295,14 +332,14 @@ class KronNewton:
                     closure_returns = closure()
                     loss = closure_returns if isinstance(closure_returns, torch.Tensor) else closure_returns[0]
                     grads = torch.autograd.grad(loss, self._params_with_grad)
+                    
                 vs = [self._delta_param_scale * torch.randn_like(p) for p in self._params_with_grad]
                 [p.add_(v) for (p, v) in zip(self._params_with_grad, vs)]
                 with torch.enable_grad():
                     perturbed_returns = closure()
                     perturbed_loss = perturbed_returns if isinstance(perturbed_returns, torch.Tensor) else perturbed_returns[0]
                     perturbed_grads = torch.autograd.grad(perturbed_loss, self._params_with_grad)
-                Hvs = [perturbed_g - g for (perturbed_g, g) in zip(perturbed_grads, grads)]
-                
+                Hvs = [perturbed_g - g for (perturbed_g, g) in zip(perturbed_grads, grads)]               
                 [p.sub_(v) for (p, v) in zip(self._params_with_grad, vs)] # simpler to remove perturbation here (Yang Gao)             
             
             # update preconditioner 
@@ -311,7 +348,9 @@ class KronNewton:
                 self._QLs_exprs = [init_kron(h, (torch.mean((torch.abs(v))**2))**(1/4) * (torch.mean((torch.abs(h))**4))**(-1/8), 
                                              self._preconditioner_max_size, self._preconditioner_max_skew) for (v, h) in zip(vs, Hvs)]
             # update QLs
-            [update_precond_kron_newton(*QL_exprs, v, h, self.lr_preconditioner) for (QL_exprs, v, h) in zip(self._QLs_exprs, vs, Hvs)]
+            self._counter_Q += 1
+            condQ = (self._counter_Q % 1000 == 0)
+            [update_precond_kron_newton(*QL_exprs, v, h, self.lr_preconditioner, condQ) for (QL_exprs, v, h) in zip(self._QLs_exprs, vs, Hvs)]
         else:
             # only evaluates the gradients
             with torch.enable_grad():
@@ -321,15 +360,15 @@ class KronNewton:
 
         # preconditioned gradients; momentum is optional      
         if self.momentum > 0:
-            beta = min(self._counter/(1 + self._counter), self.momentum)
-            self._counter += 1
+            beta = min(self._counter_m/(1 + self._counter_m), self.momentum)
+            self._counter_m += 1
             if self._ms is None:
                 self._ms = [torch.zeros_like(g) for g in grads]
                 
             [m.mul_(beta).add_(g, alpha=1 - beta) for (m, g) in zip(self._ms, grads)]
             pre_grads = [precond_grad_kron_newton(*QL_exprs, m) for (QL_exprs, m) in zip(self._QLs_exprs, self._ms)]
         else:
-            self._ms, self._counter = None, 0 # clean the buffer and counter when momentum is set to zero 
+            self._ms, self._counter_m = None, 0 # clean the buffer and counter when momentum is set to zero 
             pre_grads = [precond_grad_kron_newton(*QL_exprs, g) for (QL_exprs, g) in zip(self._QLs_exprs, grads)]
             
         # gradient clipping is optional
