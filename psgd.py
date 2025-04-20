@@ -1,3 +1,7 @@
+"""
+New inverse-free PSGD is derived with local coordinate dQ = Q * mathcal{E} * P. 
+"""
+
 import torch
 import opt_einsum
 
@@ -6,7 +10,7 @@ def norm_lower_bound_herm(A):
     """
     Returns a cheap lower bound for the spectral norm of a symmetric or Hermitian matrix A.
     """
-    max_abs = torch.max(torch.abs(A)) # used to normalize A to avoid numerically under- or over-flow
+    max_abs = torch.max(torch.abs(A)) # used to normalize A to avoid numerically under/over-flow
     if max_abs > 0:
         A = A/max_abs
         aa = torch.real(A * A.conj())
@@ -19,15 +23,6 @@ def norm_lower_bound_herm(A):
     
 ###############################################################################
 #               The Kronecker product preconditioner
-#
-# In the Lie group, I choose dQ = \mathcal{E} Q, and Q is updated as 
-# 
-#   dQ = - lr * (P*h*h^T*P - v*v^T) * Q
-# 
-# after applying another preconditioner kron(Q^T, Q^T) on \mathcal{E}. 
-# It's less stable than update dQ = - lr * Q * (P*h*h^T*P - v*v^T) derived with 
-# dQ = Q \mathcal{E}, but faster, and also can be easily fixed by dropping the 
-# 'phase' part of the polar decomposition of Q every a while. 
 
 
 def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0):
@@ -101,36 +96,20 @@ def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0):
 
 def cond_kron_precond(Q):
     """
-    Numerically condition the kron product preconditioner Q by:
-        1, balance the dynamic range of factors of Q.
-        2, remove the 'phase' parts of the polar decompositions of Q.
+    Balance the dynamic range of the factors of Q to avoid over/under-flow.
     """
-    # balance the dynamic range of Q if there are more than one factors 
     order = len(Q)  # order of tensor or the number of factors in Q 
     if order>1:
         norms = [torch.max(torch.abs(q)) for q in Q]
         gmean = (torch.cumprod(torch.stack(norms), dim=0)[-1])**(1/order) # geometric mean 
         for i, q in enumerate(Q):
             q.mul_(gmean/norms[i]) 
-            
-    # remove the 'phase' parts of the polar decompositions of Q
-    for q in Q:
-        if q.dim() > 1:
-            X = q/torch.linalg.vector_norm(q)
-            for i in range(100):
-                A = X @ X.H     # A should be close to I when converged 
-                X = 3 * X + (-16/5 * A + 6/5 * A @ A) @ X
-                if torch.max(abs(torch.triu(A, 1))) < 1e-5 and torch.max(abs(torch.diag(A) - 1)) < 1e-5:
-                    q.data = X.H @ q
-                    break
-            else:  
-                print("Fail to cond Q with polar decomposition using Newton-Schulz iteration!")
 
 
-def precond_grad_kron_whiten(QL, exprs, G, lr=0.02, updateP=True, condQ=False):
+def precond_grad_kron_whiten(QL, exprs, G, lr=0.01, updateP=True, condQ=False):
     """
     Precondition gradient G with Kron product whitening preconditioner Q. 
-    We just optionally update the preconditioner here to save the computations. 
+    We just optionally update the preconditioner here to save computations. 
     """   
     Q, L = QL
     exprP, exprGs = exprs
@@ -142,15 +121,17 @@ def precond_grad_kron_whiten(QL, exprs, G, lr=0.02, updateP=True, condQ=False):
         for i, q in enumerate(Q):
             GGc = exprGs[i](G, G.conj())
             if q.dim() < 2:
-                target_scale = total_numel/q.numel()
-                ell = torch.max(torch.abs(GGc)) + target_scale
+                qGGcqh = q * GGc * q.conj()
+                qqh = total_numel/q.numel() * q * q.conj()
+                ell = torch.max(torch.abs(qGGcqh + qqh)) 
                 L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
-                q.sub_(lr/L[i] * (GGc - target_scale) * q)
+                q.sub_(lr/L[i] * (qGGcqh - qqh) * q)
             else:
-                target_scale = total_numel/q.shape[0]
-                ell = norm_lower_bound_herm(GGc) + target_scale
+                qGGcqh = q @ GGc @ q.H
+                qqh = total_numel/q.shape[0] * q @ q.H
+                ell = norm_lower_bound_herm(qGGcqh + qqh)
                 L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
-                q.sub_(lr/L[i] * (GGc @ q - target_scale*q))
+                q.sub_(lr/L[i] * (qGGcqh - qqh) @ q)
                 
         # cond Q
         if condQ:
@@ -162,12 +143,11 @@ def precond_grad_kron_whiten(QL, exprs, G, lr=0.02, updateP=True, condQ=False):
 class KronWhiten:
     """
     Implements the Kronecker Whitening product preconditioner.
-    Propose to set 0.01 < lr_preconditioner < 0.1.  
     By default, we whiten the gradient, not the momentum. 
     """
     def __init__(self,  params_with_grad, 
                  preconditioner_max_size=float("inf"), preconditioner_max_skew=1.0, preconditioner_init_scale=None,
-                 lr_params=0.001, lr_preconditioner=0.02, momentum=0.0,
+                 lr_params=0.001, lr_preconditioner=0.01, momentum=0.0,
                  grad_clip_max_norm=None, preconditioner_update_probability=1.0, whiten_grad=True):
         # mutable members
         self.lr_params = lr_params
@@ -243,7 +223,7 @@ class KronWhiten:
         return closure_returns
     
     
-def update_precond_kron_newton(QL, exprs, V, Hvp, lr=0.05, condQ=False):
+def update_precond_kron_newton(QL, exprs, V, Hvp, lr=0.01, condQ=False):
     """
     Update the Kron product Newton preconditioner with a pair of vector and hvp, (V, Hvp). 
     """   
@@ -256,13 +236,17 @@ def update_precond_kron_newton(QL, exprs, V, Hvp, lr=0.05, condQ=False):
         HHc = exprGs[i](Hvp, Hvp.conj())
         VVc = exprGs[i](V, V.conj())
         if q.dim() < 2:
-            ell = torch.max(torch.abs(HHc + VVc)) 
+            qHHcqh = q * HHc * q.conj()
+            qVVcqh = q * VVc * q.conj()
+            ell = torch.max(torch.abs(qHHcqh + qVVcqh)) 
             L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
-            q.sub_(lr/L[i] * (HHc - VVc) * q)
+            q.sub_(lr/L[i] * (qHHcqh - qVVcqh) * q)
         else:
-            ell = norm_lower_bound_herm(HHc + VVc) 
+            qHHcqh = q @ HHc @ q.H
+            qVVcqh = q @ VVc @ q.H
+            ell = norm_lower_bound_herm(qHHcqh + qVVcqh) 
             L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
-            q.sub_(lr/L[i] * (HHc - VVc) @ q)
+            q.sub_(lr/L[i] * (qHHcqh - qVVcqh) @ q)
     
     # condition Q 
     if condQ:
@@ -280,11 +264,10 @@ def precond_grad_kron_newton(QL, exprs, G):
 class KronNewton:
     """
     Implements the Kronecker product Newton preconditioner, Q = sum_i kron(Qi1, Qi2, Qi3, ...), as a class.
-    Propose to set 0.01 < lr_preconditioner < 0.1. 
     Be extra cautious when using the finite difference method for Hvp approximation (the closure must behave like a pure function). 
     """
     def __init__(self,  params_with_grad, preconditioner_max_size=float("inf"), preconditioner_max_skew=1.0, preconditioner_init_scale=None,
-                        lr_params=0.01, lr_preconditioner=0.05, momentum=0.0,
+                        lr_params=0.01, lr_preconditioner=0.01, momentum=0.0,
                         grad_clip_max_norm=None, preconditioner_update_probability=1.0,
                         exact_hessian_vector_product:bool=True):
         # mutable members
