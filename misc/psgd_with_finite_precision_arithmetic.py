@@ -1,6 +1,7 @@
 """
 This example studies preconditioner fitting with finite precision arithemetic. 
-Double precision is more accurate, but still psgd is numerically stable with single precision. 
+The PSGD-Kron-QEP version is numerically stable with single precision.
+But, the PSGD-Kron-EQ version is less stable as it needs tri solver to update Q.  
 """
 import sys
 import matplotlib.pyplot as plt 
@@ -8,7 +9,10 @@ import torch
 import opt_einsum
 
 sys.path.append("..")
-from psgd import init_kron, precond_grad_kron_whiten, update_precond_kron_newton, precond_grad_kron_newton
+from psgd import (init_kron, 
+                  precond_grad_kron_whiten_qep, 
+                  update_precond_kron_newton_qep, 
+                  precond_grad_kron)
 
 num_iterations = 2000
 N = 10
@@ -37,8 +41,8 @@ for dtype in [torch.float64, torch.float32]:
     for i in range(num_iterations):
         V = torch.randn(N, N, N, N, N, dtype=dtype)
         G = opt_einsum.contract("aA,bB,cC,dD,eE, ABCDE->abcde", H1,H2,H3,H4,H5, V)  
-        update_precond_kron_newton(QL, exprs, V, G, lr=0.01)
-        precond_grad = precond_grad_kron_newton(QL, exprs, G)
+        update_precond_kron_newton_qep(QL, exprs, V, G, lr=0.01)
+        precond_grad = precond_grad_kron(QL, exprs, G)
         err = torch.mean((precond_grad - V)**2).item()
         errs.append(err)
     plt.semilogy(errs)
@@ -65,7 +69,7 @@ for dtype in [torch.float64, torch.float32]:
     for i in range(num_iterations):
         V = torch.randn(N, N, N, N, N, dtype=dtype)
         G = opt_einsum.contract("aA,bB,cC,dD,eE, ABCDE->abcde", H1,H2,H3,H4,H5, V)  
-        precond_grad = precond_grad_kron_whiten(QL, exprs, G, lr=0.01)
+        precond_grad = precond_grad_kron_whiten_qep(QL, exprs, G, lr=0.01)
         err = torch.mean((precond_grad - V)**2).item()
         errs.append(err)
     plt.semilogy(errs)
