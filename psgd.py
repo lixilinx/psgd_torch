@@ -1,7 +1,7 @@
 """
 The new PSGD-Kron Newton/Whitening preconditioners support two kinds of local coordinates: 
 
-    dQ = Q * mathcal{E} * P,    dQ = mathcal{E} * Q
+    QEP): dQ = Q * mathcal{E} * P;    EQ): dQ = mathcal{E} * Q
 
 The EQ one requires tri solver to update the preconditioner. 
 By default, we adopt the QEP one as it only needs matmul to update Q. 
@@ -71,7 +71,7 @@ def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QEP"):
         exprA = opt_einsum.contract_expression(",->", Q[0].shape, t.shape)
         exprP = opt_einsum.contract_expression(",,->", Q[0].shape, Q[0].shape, t.shape) 
         exprGs = [opt_einsum.contract_expression(",->", t.shape, t.shape),]
-        exprQs = [opt_einsum.contract_expression(",->", t.shape, t.shape),]
+        exprQs = [opt_einsum.contract_expression(",->", Q[0].shape, t.shape),]
     else: # tensor 
         if len(shape) > 26:
             raise ValueError(f"Got tensor with dim {len(t.shape)}; einsum runs out of letters; replace 26 with larger numbers.")   
@@ -79,8 +79,7 @@ def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QEP"):
         scale = Scale ** (1/len(shape)) 
     
         Q, L = [], []
-        exprGs = []
-        exprQs = []
+        exprGs, exprQs = [], []
         piece1A, piece2A, piece3A = [], "", "" # used for getting the subscripts for exprA
         piece1P, piece2P, piece3P, piece4P = [], [], "", "" # used for getting the subscripts for exprP
         for i, size in enumerate(shape):
@@ -153,7 +152,7 @@ def balance_kron_precond(Q):
 def update_precond_kron_eq(QL, exprs, V, Hvp, lr=0.1, for_whitening=False):
     """
     Update Kron preconditioner Q as dQ = E*Q and Lipschitz constant L with (v, hvp) pair (V, Hvp). 
-    If used for gradient/momentum whitening, we also returned the whitend gradient/momentum. 
+    If used for gradient/momentum whitening, we also return the whitend gradient/momentum. 
     """
     Q, L = QL
     _, exprGs, exprA = exprs
@@ -168,9 +167,6 @@ def update_precond_kron_eq(QL, exprs, V, Hvp, lr=0.1, for_whitening=False):
     A = exprA(*Q, Hvp)
     if for_whitening: # Hvp actually is the gradient/momentum; P*h gives the preconditioned gradient/momentum.  
         Pg = exprA(*[q.conj() if q.dim()<2 else q.H for q in Q], A)
-        beta = 0.7
-    else:
-        beta = 0.5
 
     order = V.dim()
     p = list(range(order))
@@ -186,11 +182,11 @@ def update_precond_kron_eq(QL, exprs, V, Hvp, lr=0.1, for_whitening=False):
                    
         if q.dim() < 2: # q is a diagonal matrix or scalar preconditioner
             ell = torch.max(torch.abs(term1 + term2))
-            L[i].data = torch.max(beta*L[i] + (1 - beta)*ell, ell)
+            L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
             q.sub_(lr/L[i] * (term1 - term2) * q)      
         else: # q is a matrix preconditioner 
             ell = norm_lower_bound_herm(term1 + term2)
-            L[i].data = torch.max(beta*L[i] + (1 - beta)*ell, ell)
+            L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
             q.sub_(lr/L[i] * torch.triu(term1 - term2) @ q)
 
     if torch.rand([]) < 0.01: # balance factors of Q
@@ -238,12 +234,12 @@ def precond_grad_kron_whiten_qep(QL, exprs, G, lr=0.1, updateP=True):
             if q.dim() < 2: # diagonal or scalar Q 
                 term2 = total_numel/q.numel() * q * q.conj()
                 ell = torch.max(torch.abs(term1 + term2)) 
-                L[i].data = torch.max(0.7*L[i] + 0.3*ell, ell)
+                L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
                 q.sub_(lr/L[i] * (term1 - term2) * q)
             else: # matrix Q
                 term2 = total_numel/q.shape[0] * q @ q.H
                 ell = norm_lower_bound_herm(term1 + term2)
-                L[i].data = torch.max(0.7*L[i] + 0.3*ell, ell)
+                L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
                 q.sub_(lr/L[i] * (term1 - term2) @ q)
                 
         if torch.rand([]) < 0.01: # balance factors of Q
@@ -353,11 +349,11 @@ def update_precond_kron_newton_qep(QL, exprs, V, Hvp, lr=0.1):
         term2 = exprGs[i](Qv, Qv.conj())
         if q.dim() < 2: # diagonal or scalar Q 
             ell = torch.max(torch.abs(term1 + term2)) 
-            L[i].data = torch.max(0.5*L[i] + 0.5*ell, ell)
+            L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
             q.sub_(lr/L[i] * (term1 - term2) * q)
         else: # matrix Q
             ell = norm_lower_bound_herm(term1 + term2) 
-            L[i].data = torch.max(0.5*L[i] + 0.5*ell, ell)
+            L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
             q.sub_(lr/L[i] * (term1 - term2) @ q)
     
     if torch.rand([]) < 0.01: # balance factors of Q
@@ -494,9 +490,6 @@ def update_precond_lra(UVd, Luvd, v, h, lr=0.1, for_whitening=False):
     Qh = IpUVtmatvec(U, V, d * h)
     if for_whitening: # we return the whitened gradient/momentum if used for updating the whitening preconditioner. 
         Pg = d * IpUVtmatvec(V, U, Qh)
-        beta = 0.7
-    else:
-        beta = 0.5
 
     IpVtU = V.t().mm(U)
     IpVtU.diagonal().add_(1) # avoid forming matrix I explicitly 
@@ -509,7 +502,7 @@ def update_precond_lra(UVd, Luvd, v, h, lr=0.1, for_whitening=False):
         # Note that if U and V are empty, we only need to update d.  
         aa, bb = a * a, b * b
         ell = torch.max(aa + bb)
-        Ld.data = torch.max(beta*Ld + (1 - beta)*ell, ell)
+        Ld.data = torch.max(0.9*Ld + 0.1*ell, ell)
         s = 1 - lr/Ld * (aa - bb)
         U.mul_(s)
         V.div_(s)
@@ -530,7 +523,7 @@ def update_precond_lra(UVd, Luvd, v, h, lr=0.1, for_whitening=False):
             btVVt = btV.mm(V.t())
             ell = (torch.linalg.vector_norm(a)*torch.linalg.vector_norm(atVVt) + 
                    torch.linalg.vector_norm(b)*torch.linalg.vector_norm(btVVt))
-            Lu.data = torch.max(beta*Lu + (1 - beta)*ell, ell)
+            Lu.data = torch.max(0.9*Lu + 0.1*ell, ell)
             U.sub_(lr/Lu * ( a.mm(atV.mm(IpVtU)) - b.mm(btV.mm(IpVtU)) ))
         else: # only udate V
             atU = a.t().mm(U)
@@ -539,7 +532,7 @@ def update_precond_lra(UVd, Luvd, v, h, lr=0.1, for_whitening=False):
             UUtb = U.mm(btU.t())
             ell = (torch.linalg.vector_norm(a)*torch.linalg.vector_norm(UUta) + 
                    torch.linalg.vector_norm(b)*torch.linalg.vector_norm(UUtb))
-            Lv.data = torch.max(beta*Lv + (1 - beta)*ell, ell)
+            Lv.data = torch.max(0.9*Lv + 0.1*ell, ell)
             V.sub_(lr/Lv * ( (a + V.mm(atU.t())).mm(atU) - (b + V.mm(btU.t())).mm(btU) ))
 
     if for_whitening:
@@ -584,10 +577,9 @@ class LRAWhiten:
         num_params = self._param_cumsizes[-1]
         if 2 * rank_of_approximation + 1 >= num_params: # check the rank_of_approximation setting 
             print("FYI: rank r is too high.")
-        self._UVd = []
-        for _ in range(2):
-            # +20 to: 1) avoid /0 when r=0; 2) make sure that norm(U*V') << 1 even with rank_of_approximation=1
-            self._UVd.append(torch.randn(num_params, rank_of_approximation, dtype=dtype, device=device) / (num_params*(rank_of_approximation+20))**0.5)
+        self._UVd = [] # saves U, V and d
+        self._UVd.append(torch.randn(num_params, rank_of_approximation, dtype=dtype, device=device) / (num_params*rank_of_approximation)**0.5) # U
+        self._UVd.append(self._UVd[0].clone()) # V
         if preconditioner_init_scale is None:
             print("FYI: Will set the preconditioner initial scale on the fly. Recommend to set it manually.")
         else:
@@ -680,10 +672,9 @@ class LRANewton:
         num_params = self._param_cumsizes[-1]
         if 2 * rank_of_approximation + 1 >= num_params: # check the rank_of_approximation setting 
             print("FYI: rank r is too high. DenseNewton might be a better choice.")
-        self._UVd = []
-        for _ in range(2):
-            # +20 to: 1) avoid /0 when r=0; 2) make sure that norm(U*V') << 1 even when rank_of_approximation=1
-            self._UVd.append(torch.randn(num_params, rank_of_approximation, dtype=dtype, device=device) / (num_params*(rank_of_approximation+20))**0.5)
+        self._UVd = [] # saves U, V and d
+        self._UVd.append(torch.randn(num_params, rank_of_approximation, dtype=dtype, device=device) / (num_params*rank_of_approximation)**0.5) # U
+        self._UVd.append(self._UVd[0].clone()) # V
         if preconditioner_init_scale is None:
             print("FYI: Will set the preconditioner initial scale on the fly. Recommend to set it manually.")
         else:
@@ -779,7 +770,7 @@ def update_precond_dense_eq(Q, L, v, h, lr=0.1):
     a = Q.mm(h)
     b = torch.linalg.solve_triangular(Q.t(), v, upper=False)
     ell = torch.sum(a*a + b*b)
-    L.data = torch.max(0.5*L + 0.5*ell, ell)
+    L.data = torch.max(0.9*L + 0.1*ell, ell)
     Q.sub_(lr/L * torch.triu(a.mm(a.t()) - b.mm(b.t())) @ Q)
 
 
@@ -790,7 +781,7 @@ def update_precond_dense_qep(Q, L, v, h, lr=0.1):
     a = Q @ (Q.T @ (Q @ h))
     b = Q @ v
     ell = torch.sum(a*a + b*b)
-    L.data = torch.max(0.5*L + 0.5*ell, ell)
+    L.data = torch.max(0.9*L + 0.1*ell, ell)
     Q.sub_(lr/L * (a @ (a.T @ Q) - b @ (b.T @ Q)))
 
 
@@ -908,4 +899,5 @@ class DenseNewton:
     
 
 #############       End of PSGD dense matrix Newton-type preconditioner       #############
+
 """ end of psgd """
