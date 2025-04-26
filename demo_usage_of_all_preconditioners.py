@@ -1,11 +1,11 @@
 """
-Demo the usages of all implemented preconditioners on the classic Tensor Rank Decomposition problem
+Demo the usages of all the implemented Newton-type preconditioners on the classic Tensor Rank Decomposition problem
 """
 import copy
 import time
 
 import matplotlib.pyplot as plt
-import preconditioned_stochastic_gradient_descent as psgd
+import psgd
 import torch
 
 torch.set_default_device(torch.device("cuda:0"))
@@ -51,7 +51,7 @@ for mc_trial in range(100):
     t0 = time.time()
     for epoch in range(num_iterations):
         opt.zero_grad()
-        f_value = f(*xyz) + 2 ** (-23) * sum([torch.sum(p * p) for p in xyz])
+        f_value = f(*xyz)
         f_values.append(f_value.item())
         f_value.backward()
         opt.step()
@@ -76,7 +76,7 @@ for mc_trial in range(100):
 
         def closure():
             opt.zero_grad()
-            f_value = f(*xyz) + 2 ** (-23) * sum([torch.sum(p * p) for p in xyz])
+            f_value = f(*xyz)
             f_value.backward()
             return f_value
 
@@ -89,12 +89,12 @@ for mc_trial in range(100):
     )
 
     """
-    XMat (matrix-free, a very simple preconditioner, but still can solve this problem reliably)
+    Dense matrix preconditioner (Only for problems with roughly 100K or less params, also it needs a lot of steps to fit the Hessian.)
     """
     xyz = copy.deepcopy(xyz0)
     [w.requires_grad_(True) for w in xyz]
-    opt = psgd.XMat(
-        xyz, preconditioner_init_scale=None, lr_params=0.2, lr_preconditioner=0.1
+    opt = psgd.DenseNewton(
+        xyz, lr_params=1.0, lr_preconditioner=0.5
     )
 
     f_values = []
@@ -102,7 +102,7 @@ for mc_trial in range(100):
     for _ in range(num_iterations):
 
         def closure():
-            return f(*xyz) + 2 ** (-23) * sum([torch.sum(p * p) for p in xyz])
+            return f(*xyz)
 
         f_values.append(opt.step(closure).item())
     total_time = time.time() - t0
@@ -113,12 +113,12 @@ for mc_trial in range(100):
     )
 
     """
-    Newton method (Only for problems with roughly 100K or less params, also it needs a lot of steps to fit the Hessian.)
+    Low-rank approximation preconditioner 
     """
     xyz = copy.deepcopy(xyz0)
     [w.requires_grad_(True) for w in xyz]
-    opt = psgd.Newton(
-        xyz, preconditioner_init_scale=None, lr_params=0.5, lr_preconditioner=0.2
+    opt = psgd.LRANewton(
+        xyz, lr_params=0.5, lr_preconditioner=0.2
     )
 
     f_values = []
@@ -126,7 +126,7 @@ for mc_trial in range(100):
     for _ in range(num_iterations):
 
         def closure():
-            return f(*xyz) + 2 ** (-23) * sum([torch.sum(p * p) for p in xyz])
+            return f(*xyz)
 
         f_values.append(opt.step(closure).item())
     total_time = time.time() - t0
@@ -137,12 +137,12 @@ for mc_trial in range(100):
     )
 
     """
-    Low-rank approximation (LRA. Very reliable and cheap.)
+    Kronecker product preconditioner 
     """
     xyz = copy.deepcopy(xyz0)
     [w.requires_grad_(True) for w in xyz]
-    opt = psgd.LRA(
-        xyz, preconditioner_init_scale=None, lr_params=0.2, lr_preconditioner=0.1
+    opt = psgd.KronNewton(
+        xyz, preconditioner_max_skew=float("inf"), lr_params=0.2, lr_preconditioner=0.1
     )
 
     f_values = []
@@ -150,31 +150,7 @@ for mc_trial in range(100):
     for _ in range(num_iterations):
 
         def closure():
-            return f(*xyz) + 2 ** (-23) * sum([torch.sum(p * p) for p in xyz])
-
-        f_values.append(opt.step(closure).item())
-    total_time = time.time() - t0
-    ax1.semilogy(f_values)
-    ax2.loglog(
-        torch.arange(1, num_iterations + 1).cpu() * total_time / num_iterations,
-        f_values,
-    )
-
-    """
-    Affine (or Kronecker product preconditioner. Reliable and converges fast.)
-    """
-    xyz = copy.deepcopy(xyz0)
-    [w.requires_grad_(True) for w in xyz]
-    opt = psgd.Affine(
-        xyz, preconditioner_init_scale=None, lr_params=0.2, lr_preconditioner=0.1
-    )
-
-    f_values = []
-    t0 = time.time()
-    for _ in range(num_iterations):
-
-        def closure():
-            return f(*xyz) + 2 ** (-23) * sum([torch.sum(p * p) for p in xyz])
+            return f(*xyz)
 
         f_values.append(opt.step(closure).item())
     total_time = time.time() - t0
@@ -191,10 +167,9 @@ for mc_trial in range(100):
         [
             "Gradient descent",
             "LM-BFGS",
-            "PSGD-Xmat",
-            "PSGD-Newton",
+            "PSGD-Dense",
             "PSGD-LRA",
-            "PSGD-Affine",
+            "PSGD-Kron",
         ],
         fontsize=8,
     )
@@ -207,48 +182,12 @@ for mc_trial in range(100):
         [
             "Gradient descent",
             "LM-BFGS",
-            "PSGD-Xmat",
-            "PSGD-Newton",
+            "PSGD-Dense",
             "PSGD-LRA",
-            "PSGD-Affine",
+            "PSGD-Kron",
         ],
         fontsize=8,
     )
 
     plt.savefig(f"psgd_vs_bfgs_trial{mc_trial}.svg")
     plt.show()
-
-
-# """
-# Lastly, there is the incomplete LU (ILU) factorization preconditioner.
-# I do not wrap it as a class yet.
-# Looks like LRA is a better choice than ILU.
-# """
-# xyz = copy.deepcopy(xyz0)
-# [w.requires_grad_(True) for w in xyz]
-
-# num_paras = sum([torch.numel(w) for w in xyz])
-# r = 10  # this is order of incomplete LU factorization preconditioner
-# # lower triangular matrix is [L1, 0; L2, diag(l3)]; L12 is [L1; L2]
-# L12 = 0.1 * torch.cat([torch.eye(r), torch.zeros(num_paras - r, r)], dim=0)
-# l3 = 0.1 * torch.ones(num_paras - r, 1)
-# # upper triangular matrix is [U1, U2; 0, diag(u3)]; U12 is [U1, U2]
-# U12 = 0.1 * torch.cat([torch.eye(r), torch.zeros(r, num_paras - r)], dim=1)
-# u3 = 0.1 * torch.ones(num_paras - r, 1)
-
-# f_values = []
-# for _ in range(num_iterations):
-#     loss = f(*xyz) + 2 ** (-23) * sum([torch.sum(torch.rand_like(p) * p * p) for p in xyz])
-#     f_values.append(loss.item())
-#     grads = torch.autograd.grad(loss, xyz, create_graph=True)
-#     vs = [torch.randn_like(w) for w in xyz]
-#     Hvs = torch.autograd.grad(grads, xyz, vs)
-#     with torch.no_grad():
-#         L12, l3, U12, u3 = psgd.update_precond_splu(L12, l3, U12, u3, vs, Hvs, step=0.1)
-#         pre_grads = psgd.precond_grad_splu(L12, l3, U12, u3, grads)
-#         [w.subtract_(0.2 * g) for (w, g) in zip(xyz, pre_grads)]
-# plt.semilogy(f_values)
-# plt.xlabel("Iterations")
-# plt.ylabel("Fitting loss")
-# plt.legend(["PSGD-ILU",])
-# plt.show()
