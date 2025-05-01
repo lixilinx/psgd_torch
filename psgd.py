@@ -1,16 +1,20 @@
 """
-The new PSGD-Kron Newton/Whitening preconditioners support two kinds of local coordinates: 
+The new PSGD-Kron Newton/Whitening preconditioners support three kinds of local coordinates for updating Q: 
 
-    QEP): dQ = Q * mathcal{E} * P;    EQ): dQ = mathcal{E} * Q
+    QEP):   dQ = Q * mathcal{E} * P;    
+    EQ):    dQ = mathcal{E} * Q;
+    QE):    dQ = Q * mathcal{E}.
 
-The EQ one requires tri solver to update the preconditioner. 
-By default, we adopt the QEP one as it only needs matmul to update Q. 
+The EQ one corresponds to previous implementations, and requires tri solver to update the preconditioner. 
+The other two choices only need matmul to update the preconditioner.
+It is difficult to foresee which one fits a certain problem the best. 
+By default, we select the one has the simplest form, dQ = Q * mathcal{E}. 
 
 The PSGD-LRA Newton/Whitening preconditioners still uses local coordinate dQ = mathcal{E} * Q, 
 and needs a small linear solver to update the preconditioner.
 
 I also keep the PSGD dense matrix Newton-type preconditioner here to illustrate the math. 
-It also supports both the QEP (default) and EQ local coordinates, 
+It also supports all the three sets of local coordinates for updating Q, 
 and can be a good alternative to the BFGS like quasi-Newton optimizers as no line search is required. 
 
 Xi-Lin Li, lixilinx@gmail.com, April, 2025. 
@@ -39,7 +43,7 @@ def norm_lower_bound_herm(A):
 #############       Begin of PSGD Kronecker product preconditioners       #############         
 
 
-def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QEP"):
+def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QE"):
     """
     For a scalar or tensor t, we initialize its states (preconditioner Q and Lipschitz constant L), 
     and reusable contraction expressions for updating Q and preconditioning gradient.
@@ -131,10 +135,12 @@ def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QEP"):
         exprP = opt_einsum.contract_expression(subscripts, *[q.shape for q in Q], *[q.shape for q in Q], t.shape)
     
     exprGs, exprQs = tuple(exprGs), tuple(exprQs)
-    if dQ == "QEP": # only matmul is needed to update Q; no need of exprA 
+    if dQ == "QEP": # no need of exprA 
         return [[Q, L], (exprP, exprGs, exprQs)]
-    else: # Lie group; needs tri solver to update Q; no need of exprQs 
+    elif dQ == "EQ": # no need of exprQs 
         return [[Q, L], (exprP, exprGs, exprA)]
+    else: # dQ = "QE"; no need of exprA and exprQs
+        return [[Q, L], (exprP, exprGs)]
 
 
 def balance_kron_precond(Q):
@@ -227,6 +233,9 @@ def precond_grad_kron_whiten_qep(QL, exprs, G, lr=0.1, updateP=True):
     Pg = exprP(*[q.conj() for q in Q], *Q, G) 
     
     if updateP: # update preconditioner
+        # balancing is not optional as L for each factor is not scaling invariant 
+        balance_kron_precond(Q) 
+
         total_numel = G.numel() 
         for i, q in enumerate(Q):
             QPg = exprQs[i](q, Pg)
@@ -241,22 +250,49 @@ def precond_grad_kron_whiten_qep(QL, exprs, G, lr=0.1, updateP=True):
                 ell = norm_lower_bound_herm(term1 + term2)
                 L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
                 q.sub_(lr/L[i] * (term1 - term2) @ q)
+                    
+    return Pg
+
+
+def precond_grad_kron_whiten_qe(QL, exprs, G, lr=0.1, updateP=True):
+    """
+    Precondition gradient G with Kron gradient/momentum whitening preconditioner Q. 
+    We just optionally update the preconditioner Q as dQ = Q*E to save computations. 
+    """   
+    Q, L = QL
+    exprP, exprGs = exprs
+    Pg = exprP(*[q.conj() for q in Q], *Q, G) 
+    
+    if updateP: # update preconditioner
+        total_numel = G.numel() 
+        for i, q in enumerate(Q):
+            term1 = exprGs[i](Pg, Pg.conj())
+            if q.dim() < 2: # diagonal or scalar Q 
+                term2 = total_numel/q.numel() # times I
+                ell = torch.max(torch.abs(term1)) + term2 
+                L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
+                q.sub_(lr/L[i] * q * (term1 - term2))
+            else: # matrix Q
+                term2 = total_numel/q.shape[0] # times I
+                ell = norm_lower_bound_herm(term1) + term2
+                L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
+                q.sub_(lr/L[i] * (q @ term1 - q * term2))
                 
         if torch.rand([]) < 0.01: # balance factors of Q
             balance_kron_precond(Q)
                     
     return Pg
-                    
+
 
 class KronWhiten:
     """
     Implements the PSGD optimizer with the Kronecker product gradient/momentum whitening preconditioner.
-    By default, we whiten the gradient and update Q as dQ = Q*E*P. 
+    By default, we whiten the gradient and update Q as dQ = Q*E. 
     """
     def __init__(self,  params_with_grad, 
                  preconditioner_max_size=float("inf"), preconditioner_max_skew=1.0, preconditioner_init_scale:float|None=None,
                  lr_params=0.001, lr_preconditioner=0.1, momentum=0.0,
-                 grad_clip_max_norm:float|None=None, preconditioner_update_probability=1.0, whiten_grad=True, dQ="QEP"):
+                 grad_clip_max_norm:float|None=None, preconditioner_update_probability=1.0, whiten_grad=True, dQ="QE"):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner 
@@ -281,14 +317,16 @@ class KronWhiten:
         self._dQ = dQ
         if dQ == "QEP":
             self._precond_grad = precond_grad_kron_whiten_qep
-        else:
+        elif dQ == "EQ":
             self._precond_grad = precond_grad_kron_whiten_eq
+        else: # dQ = "QE"
+            self._precond_grad = precond_grad_kron_whiten_qe
 
 
     @torch.no_grad()
     def step(self, closure):
         """
-        Performs a single step of PSGD with the Kronecker product gradient/momentum whitening preconditioner.
+        Performs one step of PSGD with the Kronecker product gradient/momentum whitening preconditioner.
         """
         with torch.enable_grad():
             closure_returns = closure()
@@ -340,6 +378,9 @@ def update_precond_kron_newton_qep(QL, exprs, V, Hvp, lr=0.1):
     """   
     Q, L = QL
     exprP, exprGs, exprQs = exprs
+
+    # balancing is not optional as L for each factor is not scaling invariant 
+    balance_kron_precond(Q) 
     Ph = exprP(*[q.conj() for q in Q], *Q, Hvp) 
 
     for i, q in enumerate(Q):
@@ -355,6 +396,27 @@ def update_precond_kron_newton_qep(QL, exprs, V, Hvp, lr=0.1):
             ell = norm_lower_bound_herm(term1 + term2) 
             L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
             q.sub_(lr/L[i] * (term1 - term2) @ q)
+
+
+def update_precond_kron_newton_qe(QL, exprs, V, Hvp, lr=0.1):
+    """
+    Update the Kron Newton-type preconditioner Q as dQ = Q*E with a pair of vector and hvp, (V, Hvp). 
+    """   
+    Q, L = QL
+    exprP, exprGs = exprs
+    Ph = exprP(*[q.conj() for q in Q], *Q, Hvp) 
+
+    for i, q in enumerate(Q):
+        term1 = exprGs[i](Ph, Ph.conj())
+        term2 = exprGs[i](V, V.conj())
+        if q.dim() < 2: # diagonal or scalar Q 
+            ell = torch.max(torch.abs(term1 + term2)) 
+            L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
+            q.sub_(lr/L[i] * q * (term1 - term2))
+        else: # matrix Q
+            ell = norm_lower_bound_herm(term1 + term2) 
+            L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
+            q.sub_(lr/L[i] * q @ (term1 - term2))
     
     if torch.rand([]) < 0.01: # balance factors of Q
         balance_kron_precond(Q)
@@ -363,13 +425,13 @@ def update_precond_kron_newton_qep(QL, exprs, V, Hvp, lr=0.1):
 class KronNewton:
     """
     Implements the Kronecker product Newton-type preconditioner as a class.
-    By default, we update Q as dQ = Q*E*P. 
+    By default, we update Q as dQ = Q*E. 
     Be extra cautious when using the finite difference method for Hvp approximation (the closure must behave like a pure function). 
     """
     def __init__(self,  params_with_grad, preconditioner_max_size=float("inf"), preconditioner_max_skew=1.0, preconditioner_init_scale:float|None=None,
                         lr_params=0.01, lr_preconditioner=0.1, momentum=0.0,
                         grad_clip_max_norm:float|None=None, preconditioner_update_probability=1.0,
-                        exact_hessian_vector_product=True, dQ="QEP"):
+                        exact_hessian_vector_product=True, dQ="QE"):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner        
@@ -395,14 +457,16 @@ class KronNewton:
         self._dQ = dQ
         if dQ == "QEP":
             self._update_precond = update_precond_kron_newton_qep
-        else:
+        elif dQ == "EQ":
             self._update_precond = update_precond_kron_eq
+        else: # dQ = "QE"
+            self._update_precond = update_precond_kron_newton_qe
 
 
     @torch.no_grad()
     def step(self, closure):
         """
-        Performs a single step of PSGD with the Kronecker product Newton-type preconditioner.  
+        Performs one step of PSGD with the Kronecker product Newton-type preconditioner.  
         """
         if (torch.rand([]) < self.preconditioner_update_probability) or (self._QLs_exprs is None):
             # evaluates gradients, Hessian-vector product, and updates the preconditioner
@@ -594,7 +658,7 @@ class LRAWhiten:
     @torch.no_grad()
     def step(self, closure):
         """
-        Performs a single step of PSGD LRA gradient/momentum whitening optimizer. 
+        Performs one step of the PSGD LRA gradient/momentum whitening optimizer. 
         """
         with torch.enable_grad():
             closure_returns = closure()
@@ -689,7 +753,7 @@ class LRANewton:
     @torch.no_grad()
     def step(self, closure):
         """
-        Performs a single step of the PSGD LRA Newton optimizer. 
+        Performs one step of the PSGD LRA Newton optimizer. 
         """
         if (torch.rand([]) < self.preconditioner_update_probability) or (len(self._UVd) < 3):
             # evaluates gradients, Hessian-vector product, and updates the preconditioner
@@ -785,10 +849,20 @@ def update_precond_dense_qep(Q, L, v, h, lr=0.1):
     Q.sub_(lr/L * (a @ (a.T @ Q) - b @ (b.T @ Q)))
 
 
+def update_precond_dense_qe(Q, L, v, h, lr=0.1):
+    """
+    Update dense matrix Newton-type preconditioner Q with local coordinate dQ = Q * mathcal{E}
+    """
+    a = Q.T @ (Q @ h)
+    ell = torch.sum(a*a + v*v)
+    L.data = torch.max(0.9*L + 0.1*ell, ell)
+    Q.sub_(lr/L * ((Q @ a) @ a.T - (Q @ v) @ v.T))
+
+
 class DenseNewton:
     """
     Implements the PSGD dense matrix Newton-type preconditioner as a class. 
-    Two choices for dQ: QEP (the default one; only needs matmul to update Q) and EQ (needs tri solver to update Q). 
+    By default, we update Q as dQ = Q * mathcal{E}. 
     Be extra cautious when using the finite difference method for Hvp approximation (the closure must behave like a pure function).
     It's mainly for illustrating how PSGD works due to its simplicity. 
     It's also a good alternative to the BFGS like quasi-Newton methods as no line search is required. 
@@ -796,7 +870,7 @@ class DenseNewton:
     def __init__(self, params_with_grad, preconditioner_init_scale:float|None=None,
                  lr_params=0.01, lr_preconditioner=0.1, momentum=0.0, 
                  grad_clip_max_norm:float|None=None, preconditioner_update_probability=1.0,
-                 exact_hessian_vector_product=True, dQ="QEP"):
+                 exact_hessian_vector_product=True, dQ="QE"):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner
@@ -821,16 +895,18 @@ class DenseNewton:
         self._exact_hessian_vector_product = exact_hessian_vector_product
         if not exact_hessian_vector_product:
             print("FYI: Approximate Hvp with finite-difference method. Make sure that: 1) the closure behaves like a pure function; 2) delta param scale is proper.")
-        if dQ == "QEP": # only need matmul to update Q 
+        if dQ == "QEP": # only needs matmul to update Q 
             self._update_precond = update_precond_dense_qep
-        else: # needs tri solver to update Q in Lie group 
+        elif dQ == "EQ": # needs tri solver to update Q  
             self._update_precond = update_precond_dense_eq
+        else: # dQ = "QE"; only needs matmul to update Q
+            self._update_precond = update_precond_dense_qe
 
 
     @torch.no_grad()
     def step(self, closure):
         """
-        Performs a single step of PSGD with dense matrix Newton-type preconditioner. 
+        Performs one step of PSGD with dense matrix Newton-type preconditioner. 
         """
         if (torch.rand([]) < self.preconditioner_update_probability) or (self._Q is None):
             # evaluates gradients, Hessian-vector product, and updates the preconditioner
