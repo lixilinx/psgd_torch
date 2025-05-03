@@ -1,24 +1,30 @@
 """
-The new PSGD-Kron Newton/Whitening preconditioners support three kinds of local coordinates for updating Q: 
+The new PSGD-Kron Newton/Whitening preconditioners support four kinds of local coordinates for updating Q/P: 
 
-    QEP):   dQ = Q * mathcal{E} * P;    
-    EQ):    dQ = mathcal{E} * Q;
-    QE):    dQ = Q * mathcal{E}.
+    QUAD):  dP = mathcal{E} * P + P * mathcal{E} - mathcal{E} * P * mathcal{E}
+    The qudratic term is deliberately kept to ensure that P > 0.   
+    This is the only choice that can fit the preconditioner P directly. 
 
-The EQ one corresponds to previous implementations, and requires tri solver to update the preconditioner. 
-The other two choices only need matmul to update the preconditioner.
-It is difficult to foresee which one fits a certain problem the best. 
-By default, we select the one has the simplest form, dQ = Q * mathcal{E}. 
+    QE):    dQ = Q * mathcal{E}
+    This leads to a simple and effective way for updating Q in Lie groups. 
 
-The PSGD-LRA Newton/Whitening preconditioners still uses local coordinate dQ = mathcal{E} * Q, 
+    EQ):    dQ = mathcal{E} * Q
+    This choice recovers the old PSGD way for updating Q in Lie groups. 
+    Its main drawback is that triangualr solvers are required for updating Q.  
+
+    QEP):   dQ = Q * mathcal{E} * P
+    This last choice works very well if it does. 
+    But, we do not recommend it as Q can get trapped around ill-conditioned matrices. 
+
+The PSGD-LRA Newton/Whitening preconditioners still adopts local coordinate dQ = mathcal{E} * Q, 
 and needs a small linear solver to update the preconditioner.
 
 I also keep the PSGD dense matrix Newton-type preconditioner here to illustrate the math. 
-It also supports all the three sets of local coordinates for updating Q, 
+It supports all the four sets of local coordinates for updating Q/P, 
 and can be a good alternative to the BFGS like quasi-Newton optimizers as no line search is required. 
 
-Xi-Lin Li, lixilinx@gmail.com, April, 2025. 
-Main refs: https://arxiv.org/abs/1512.04202; https://arxiv.org/abs/2402.11858. 
+Xi-Lin Li, lixilinx@gmail.com; April and May, 2025. 
+Main refs: https://arxiv.org/abs/1512.04202; https://arxiv.org/abs/2402.11858 (needs updates). 
 """
 
 import opt_einsum
@@ -43,7 +49,7 @@ def norm_lower_bound_herm(A):
 #############       Begin of PSGD Kronecker product preconditioners       #############         
 
 
-def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QE"):
+def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QUAD"):
     """
     For a scalar or tensor t, we initialize its states (preconditioner Q and Lipschitz constant L), 
     and reusable contraction expressions for updating Q and preconditioning gradient.
@@ -57,17 +63,19 @@ def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QE"):
     2, A series of enisum contract expressions. The following subscript examples are for a 5th order tensor.  
         2.1, exprP is the expression for applying the Preconditioner on the gradient, e.g.,
                 'aA,bB,cC,dD,eE,aα,bβ,cγ,dδ,eε,αβγδε->ABCDE'
-        2.2, the i-th expression of exprGs for the contraction of two tensors that only keeps the i-th dim, e.g.,
+        2.2, the i-th expression of exprGs is for the contraction of two tensors that only keeps the i-th dim, e.g.,
                 'abCde,abγde->Cγ'
             for i=2. It's useful for Gradient calculation.  
-        2.3, exprA (only needed for choice dQ="EQ") is the expression for applying All the factors of Q on a tensor, e.g.,
+        2.3, exprA is the expression for applying All the factors of Q on a tensor, e.g.,
                 'aA,bB,cC,dD,eE,ABCDE->abcde' 
-        2.4, the i-th expression of exprQs (only needed for choice dQ="QEP") is the expression for applying the i-th factor of Q on a tensor, e.g., 
+        2.4, the i-th expression of exprQs is the expression for applying the i-th factor of Q on a tensor, e.g., 
                 'Cγ,abγde->abCde'
             for i=2. 
 
         Please check https://drive.google.com/file/d/1CEEq7A3_l8EcPEDa_sYtqr5aMLVeZWL7/view?usp=drive_link for notations and derivations. 
     """
+    if dQ == "QUAD": # the only case that we fit P directly; so square Scale 
+        Scale *= Scale 
     shape = t.shape 
     if len(shape)==0: # scalar 
         Q = [Scale * torch.ones_like(t),]
@@ -88,7 +96,7 @@ def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QE"):
         piece1P, piece2P, piece3P, piece4P = [], [], "", "" # used for getting the subscripts for exprP
         for i, size in enumerate(shape):
             L.append(torch.zeros([], dtype=t.real.dtype, device=t.device))
-            if size == 1 or size > max_size or size**2 > max_skew * t.numel():
+            if size <= 1 or size > max_size or size**2 > max_skew * t.numel():
                 # use diagonal matrix as preconditioner for this dim 
                 Q.append(scale * torch.ones(size, dtype=t.dtype, device=t.device))
                 
@@ -135,12 +143,15 @@ def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QE"):
         exprP = opt_einsum.contract_expression(subscripts, *[q.shape for q in Q], *[q.shape for q in Q], t.shape)
     
     exprGs, exprQs = tuple(exprGs), tuple(exprQs)
-    if dQ == "QEP": # no need of exprA 
+    if dQ == "QEP": 
         return [[Q, L], (exprP, exprGs, exprQs)]
-    elif dQ == "EQ": # no need of exprQs 
+    elif dQ == "EQ": 
         return [[Q, L], (exprP, exprGs, exprA)]
-    else: # dQ = "QE"; no need of exprA and exprQs
+    elif dQ == "QE": 
         return [[Q, L], (exprP, exprGs)]
+    else:
+        assert dQ == "QUAD" # Q actually is P in this case 
+        return [[Q, L], (exprA, exprGs)]
 
 
 def balance_kron_precond(Q):
@@ -202,7 +213,7 @@ def update_precond_kron_eq(QL, exprs, V, Hvp, lr=0.1, for_whitening=False):
         return Pg
     # else:
     #     return None 
-                
+
 
 def precond_grad_kron(QL, exprs, G):
     """
@@ -284,15 +295,49 @@ def precond_grad_kron_whiten_qe(QL, exprs, G, lr=0.1, updateP=True):
     return Pg
 
 
+def precond_grad_kron_whiten_quad(QL, exprs, G, lr=0.1, updateP=True):
+    """
+    Precondition gradient G with Kron gradient/momentum whitening preconditioner P (Q actually is P here). 
+    We just optionally update the preconditioner P here to save computations. 
+    """   
+    Q, L = QL
+    exprA, exprGs = exprs
+    Pg = exprA(*Q, G) # Q actually is P; so just applying all its factors once.   
+    
+    if updateP: # update preconditioner
+        total_numel = G.numel() 
+        for i, q in enumerate(Q):
+            term1 = exprGs[i](Pg, Pg.conj())
+            if q.dim() < 2: # diagonal or scalar Q 
+                term2 = total_numel/q.numel() # times I
+                ell = torch.max(torch.abs(term1)) + term2 
+                L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
+                gain = 1 - lr/2/L[i] * (term1 - term2)
+                q.mul_(gain * gain) 
+            else: # matrix Q
+                term2 = total_numel/q.shape[0] # times I
+                ell = norm_lower_bound_herm(term1) + term2
+                L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
+                lr = lr/2/L[i]
+                p = q - lr * (term1 @ q - term2 * q) 
+                p = p - lr * (p @ term1 - p * term2) 
+                q.data = (p + p.H)/2 # p must be symmetric/hermitian  
+                
+        if torch.rand([]) < 0.01: # balance factors of Q
+            balance_kron_precond(Q)
+                    
+    return Pg
+
+
 class KronWhiten:
     """
     Implements the PSGD optimizer with the Kronecker product gradient/momentum whitening preconditioner.
-    By default, we whiten the gradient and update Q as dQ = Q*E. 
+    By default, we whiten the gradient and update P with a quadratic form for dP. 
     """
     def __init__(self,  params_with_grad, 
                  preconditioner_max_size=float("inf"), preconditioner_max_skew=1.0, preconditioner_init_scale:float|None=None,
                  lr_params=0.001, lr_preconditioner=0.1, momentum=0.0,
-                 grad_clip_max_norm:float|None=None, preconditioner_update_probability=1.0, whiten_grad=True, dQ="QE"):
+                 grad_clip_max_norm:float|None=None, preconditioner_update_probability=1.0, whiten_grad=True, dQ="QUAD"):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner 
@@ -319,8 +364,11 @@ class KronWhiten:
             self._precond_grad = precond_grad_kron_whiten_qep
         elif dQ == "EQ":
             self._precond_grad = precond_grad_kron_whiten_eq
-        else: # dQ = "QE"
+        elif dQ == "QE":
             self._precond_grad = precond_grad_kron_whiten_qe
+        else:
+            assert dQ == "QUAD"
+            self._precond_grad = precond_grad_kron_whiten_quad
 
 
     @torch.no_grad()
@@ -422,16 +470,44 @@ def update_precond_kron_newton_qe(QL, exprs, V, Hvp, lr=0.1):
         balance_kron_precond(Q)
 
 
+def update_precond_kron_newton_quad(QL, exprs, V, Hvp, lr=0.1):
+    """
+    Update the Kron Newton-type preconditioner Q with a quadratic form for dQ and pair of vector and hvp, (V, Hvp). 
+    """   
+    Q, L = QL
+    exprA, exprGs = exprs
+    Ph = exprA(*Q, Hvp) # Q actually is P; so only need to apply its factors once.  
+
+    for i, q in enumerate(Q):
+        term1 = exprGs[i](Ph, Ph.conj())
+        term2 = exprGs[i](V, V.conj())
+        if q.dim() < 2: # diagonal or scalar Q 
+            ell = torch.max(torch.abs(term1 + term2)) 
+            L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
+            gain = 1 - lr/2/L[i] * (term1 - term2)
+            q.mul_(gain * gain)
+        else: # matrix Q
+            ell = norm_lower_bound_herm(term1 + term2) 
+            L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
+            err = lr/2/L[i] * (term1 - term2)
+            p = q - err @ q     # p = q - lr/L[i]/2 * (term1 - term2) @ q
+            p = p - p @ err     # p = p - lr/L[i]/2 * p @ (term1 - term2)
+            q.data = (p + p.H)/2 # p must be symmetric or hermitian  
+    
+    if torch.rand([]) < 0.01: # balance factors of Q
+        balance_kron_precond(Q)
+
+
 class KronNewton:
     """
     Implements the Kronecker product Newton-type preconditioner as a class.
-    By default, we update Q as dQ = Q*E. 
+    By default, we update Q with a quadratic form for dQ. 
     Be extra cautious when using the finite difference method for Hvp approximation (the closure must behave like a pure function). 
     """
     def __init__(self,  params_with_grad, preconditioner_max_size=float("inf"), preconditioner_max_skew=1.0, preconditioner_init_scale:float|None=None,
                         lr_params=0.01, lr_preconditioner=0.1, momentum=0.0,
                         grad_clip_max_norm:float|None=None, preconditioner_update_probability=1.0,
-                        exact_hessian_vector_product=True, dQ="QE"):
+                        exact_hessian_vector_product=True, dQ="QUAD"):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner        
@@ -455,12 +531,18 @@ class KronNewton:
         if not exact_hessian_vector_product:
             print("FYI: Approximate Hvp with finite-difference method. Make sure that: 1) the closure behaves like a pure function; 2) delta param scale is proper.")
         self._dQ = dQ
-        if dQ == "QEP":
-            self._update_precond = update_precond_kron_newton_qep
-        elif dQ == "EQ":
-            self._update_precond = update_precond_kron_eq
-        else: # dQ = "QE"
-            self._update_precond = update_precond_kron_newton_qe
+        if dQ == "QUAD":
+            self._update_precond = update_precond_kron_newton_quad
+            self._precond_grad = lambda QL, exprs, G: exprs[0](*QL[0], G) # it's exprA(*Q, G) 
+        else:
+            self._precond_grad = precond_grad_kron
+            if dQ == "QEP":
+                self._update_precond = update_precond_kron_newton_qep
+            elif dQ == "EQ":
+                self._update_precond = update_precond_kron_eq
+            else:
+                assert dQ == "QE"
+                self._update_precond = update_precond_kron_newton_qe            
 
 
     @torch.no_grad()
@@ -510,10 +592,10 @@ class KronNewton:
                 self._ms = [torch.zeros_like(g) for g in grads]
                 
             [m.mul_(beta).add_(g, alpha=1 - beta) for (m, g) in zip(self._ms, grads)]
-            pre_grads = [precond_grad_kron(*QL_exprs, m) for (QL_exprs, m) in zip(self._QLs_exprs, self._ms)]
+            pre_grads = [self._precond_grad(*QL_exprs, m) for (QL_exprs, m) in zip(self._QLs_exprs, self._ms)]
         else: # precondition the gradient 
             self._ms, self._counter_m = None, 0 # clear the buffer and counter when momentum is set to zero 
-            pre_grads = [precond_grad_kron(*QL_exprs, g) for (QL_exprs, g) in zip(self._QLs_exprs, grads)]
+            pre_grads = [self._precond_grad(*QL_exprs, g) for (QL_exprs, g) in zip(self._QLs_exprs, grads)]
             
         if self.grad_clip_max_norm is None: # no grad clipping 
             lr = self.lr_params
@@ -560,44 +642,41 @@ def update_precond_lra(UVd, Luvd, v, h, lr=0.1, for_whitening=False):
     invQtv = v/d
     invQtv = invQtv - V.mm(torch.linalg.solve(IpVtU.t(), U.t().mm(invQtv)))   
     
-    a, b = Qh, invQtv
-    if torch.rand([]) < 1/3 or U.numel() == 0:
-        # Update in the group of diagonal matrices (will impact U and V too). 
-        # Note that if U and V are empty, we only need to update d.  
-        aa, bb = a * a, b * b
-        ell = torch.max(aa + bb)
-        Ld.data = torch.max(0.9*Ld + 0.1*ell, ell)
-        s = 1 - lr/Ld * (aa - bb)
-        U.mul_(s)
-        V.div_(s)
-        d.mul_(s)
-    else: # update U or V
-        # Balance the numerical dynamic ranges of U and V. 
-        # Not optional as Lu and Lv are not scaling invariant. 
-        normU = torch.linalg.vector_norm(U)
-        normV = torch.linalg.vector_norm(V)
-        rho = torch.sqrt(normU/normV)
-        U.div_(rho)
-        V.mul_(rho)
-    
-        if torch.rand([]) < 0.5: # only update U
-            atV = a.t().mm(V)
-            btV = b.t().mm(V)
-            atVVt = atV.mm(V.t())
-            btVVt = btV.mm(V.t())
-            ell = (torch.linalg.vector_norm(a)*torch.linalg.vector_norm(atVVt) + 
-                   torch.linalg.vector_norm(b)*torch.linalg.vector_norm(btVVt))
-            Lu.data = torch.max(0.9*Lu + 0.1*ell, ell)
-            U.sub_(lr/Lu * ( a.mm(atV.mm(IpVtU)) - b.mm(btV.mm(IpVtU)) ))
-        else: # only udate V
-            atU = a.t().mm(U)
-            btU = b.t().mm(U)
-            UUta = U.mm(atU.t())
-            UUtb = U.mm(btU.t())
-            ell = (torch.linalg.vector_norm(a)*torch.linalg.vector_norm(UUta) + 
-                   torch.linalg.vector_norm(b)*torch.linalg.vector_norm(UUtb))
-            Lv.data = torch.max(0.9*Lv + 0.1*ell, ell)
-            V.sub_(lr/Lv * ( (a + V.mm(atU.t())).mm(atU) - (b + V.mm(btU.t())).mm(btU) ))
+    # Balance the numerical dynamic ranges of U and V. 
+    # Not optional as Lu and Lv are not scaling invariant. 
+    normU = torch.linalg.vector_norm(U)
+    normV = torch.linalg.vector_norm(V)
+    rho = torch.sqrt(normU/normV)
+    U.div_(rho)
+    V.mul_(rho)
+
+    a, b = Qh, invQtv        
+    aa, bb = a * a, b * b
+    if torch.rand([]) < 0.5: # only update U
+        atV = a.t().mm(V)
+        btV = b.t().mm(V)
+        atVVt = atV.mm(V.t())
+        btVVt = btV.mm(V.t())
+        ell = (torch.linalg.vector_norm(a)*torch.linalg.vector_norm(atVVt) + 
+               torch.linalg.vector_norm(b)*torch.linalg.vector_norm(btVVt))
+        Lu.data = torch.max(0.9*Lu + 0.1*ell, ell)
+        U.sub_(lr/Lu * ( a.mm(atV.mm(IpVtU)) - b.mm(btV.mm(IpVtU)) ))
+    else: # only udate V
+        atU = a.t().mm(U)
+        btU = b.t().mm(U)
+        UUta = U.mm(atU.t())
+        UUtb = U.mm(btU.t())
+        ell = (torch.linalg.vector_norm(a)*torch.linalg.vector_norm(UUta) + 
+               torch.linalg.vector_norm(b)*torch.linalg.vector_norm(UUtb))
+        Lv.data = torch.max(0.9*Lv + 0.1*ell, ell)
+        V.sub_(lr/Lv * ( (a + V.mm(atU.t())).mm(atU) - (b + V.mm(btU.t())).mm(btU) ))
+    # always update d after U and V as its update impacts U and V too
+    ell = torch.max(aa + bb)
+    Ld.data = torch.max(0.9*Ld + 0.1*ell, ell)
+    s = 1 - lr/Ld * (aa - bb)
+    U.mul_(s)
+    V.div_(s)
+    d.mul_(s)
 
     if for_whitening:
         return Pg # return the preconditioned gradient/momentum 
@@ -840,7 +919,7 @@ def update_precond_dense_eq(Q, L, v, h, lr=0.1):
 
 def update_precond_dense_qep(Q, L, v, h, lr=0.1):
     """
-    Update dense matrix Newton-type preconditioner Q with local coordinate dQ = Q * mathcal{E} * P
+    Update dense matrix Newton-type preconditioner Q with local coordinate dQ = Q * mathcal{E} * P.
     """
     a = Q @ (Q.T @ (Q @ h))
     b = Q @ v
@@ -851,7 +930,7 @@ def update_precond_dense_qep(Q, L, v, h, lr=0.1):
 
 def update_precond_dense_qe(Q, L, v, h, lr=0.1):
     """
-    Update dense matrix Newton-type preconditioner Q with local coordinate dQ = Q * mathcal{E}
+    Update dense matrix Newton-type preconditioner Q with local coordinate dQ = Q * mathcal{E}.
     """
     a = Q.T @ (Q @ h)
     ell = torch.sum(a*a + v*v)
@@ -859,10 +938,23 @@ def update_precond_dense_qe(Q, L, v, h, lr=0.1):
     Q.sub_(lr/L * ((Q @ a) @ a.T - (Q @ v) @ v.T))
 
 
+def update_precond_dense_quad(Q, L, v, h, lr=0.1):
+    """
+    Update dense matrix Newton-type preconditioner Q with a quadratic form for dQ.
+    """
+    a = Q @ h # Q actually is P; so just apply it once. 
+    ell = torch.sum(a*a + v*v)
+    L.data = torch.max(0.9*L + 0.1*ell, ell)
+    lr = lr/2/L
+    p = Q - lr * (a @ (a.T @ Q) - v @ (v.T @ Q)) 
+    p = p - lr * ((p @ a) @ a.T - (p @ v) @ v.T) 
+    Q.data = (p + p.T)/2 
+
+
 class DenseNewton:
     """
     Implements the PSGD dense matrix Newton-type preconditioner as a class. 
-    By default, we update Q as dQ = Q * mathcal{E}. 
+    By default, we update Q with a quadratic form for dQ. 
     Be extra cautious when using the finite difference method for Hvp approximation (the closure must behave like a pure function).
     It's mainly for illustrating how PSGD works due to its simplicity. 
     It's also a good alternative to the BFGS like quasi-Newton methods as no line search is required. 
@@ -870,7 +962,7 @@ class DenseNewton:
     def __init__(self, params_with_grad, preconditioner_init_scale:float|None=None,
                  lr_params=0.01, lr_preconditioner=0.1, momentum=0.0, 
                  grad_clip_max_norm:float|None=None, preconditioner_update_probability=1.0,
-                 exact_hessian_vector_product=True, dQ="QE"):
+                 exact_hessian_vector_product=True, dQ="QUAD"):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner
@@ -889,19 +981,28 @@ class DenseNewton:
         if preconditioner_init_scale is None: # initialize Q on the fly
             self._Q = None 
         else:
+            if dQ == "QUAD": # Q actually is P 
+                preconditioner_init_scale *= preconditioner_init_scale
             self._Q = torch.eye(num_params, dtype=dtype, device=device) * preconditioner_init_scale
         self._L = torch.zeros([]) # Lipschitz constant estimation for the psgd criterion 
         self._m, self._counter_m = None, 0 # buffer and counter for momentum 
         self._exact_hessian_vector_product = exact_hessian_vector_product
         if not exact_hessian_vector_product:
             print("FYI: Approximate Hvp with finite-difference method. Make sure that: 1) the closure behaves like a pure function; 2) delta param scale is proper.")
-        if dQ == "QEP": # only needs matmul to update Q 
-            self._update_precond = update_precond_dense_qep
-        elif dQ == "EQ": # needs tri solver to update Q  
-            self._update_precond = update_precond_dense_eq
-        else: # dQ = "QE"; only needs matmul to update Q
-            self._update_precond = update_precond_dense_qe
-
+        self._dQ = dQ
+        if dQ == "QUAD":
+            self._update_precond = update_precond_dense_quad
+            self._precond_grad = lambda Q, g: Q @ g
+        else:
+            self._precond_grad = lambda Q, g: Q.T @ (Q @ g)
+            if dQ == "QEP":
+                self._update_precond = update_precond_dense_qep
+            elif dQ == "EQ":
+                self._update_precond = update_precond_dense_eq           
+            else: 
+                assert dQ == "QE"
+                self._update_precond = update_precond_dense_qe
+                        
 
     @torch.no_grad()
     def step(self, closure):
@@ -935,7 +1036,10 @@ class DenseNewton:
             v = torch.cat([torch.reshape(v, [-1, 1]) for v in vs]) 
             h = torch.cat([torch.reshape(h, [-1, 1]) for h in Hvs]) 
             if self._Q is None: # initialize Q on the fly if it is None
-                self._Q = torch.eye(len(v), dtype=v.dtype, device=v.device) * (torch.mean(v*v))**(1/4) * (torch.mean(h**4))**(-1/8)
+                scale = (torch.mean(v*v))**(1/4) * (torch.mean(h**4))**(-1/8)
+                if self._dQ == "QUAD": # Q actually is P in this case 
+                    scale *= scale 
+                self._Q = torch.eye(len(v), dtype=v.dtype, device=v.device) * scale
 
             # update preconditioner 
             self._update_precond(self._Q, self._L, v, h, self.lr_preconditioner)
@@ -955,10 +1059,10 @@ class DenseNewton:
                 self._m = torch.zeros_like(grad)
 
             self._m.mul_(beta).add_(grad, alpha=1 - beta)
-            pre_grad = self._Q.T @ (self._Q @ self._m)
+            pre_grad = self._precond_grad(self._Q, self._m)
         else:
             self._m, self._counter_m = None, 0 # clear the buffer and counter when momentum is set to zero 
-            pre_grad = self._Q.T @ (self._Q @ grad)
+            pre_grad = self._precond_grad(self._Q, grad)
         
         if self.grad_clip_max_norm is None: # no grad clipping 
             lr = self.lr_params
