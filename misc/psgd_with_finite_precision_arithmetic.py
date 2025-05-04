@@ -36,12 +36,12 @@ for dtype in [torch.float64, torch.float32]:
     H1, H2, H3, H4, H5 = H1.to(dtype), H2.to(dtype), H3.to(dtype), H4.to(dtype), H5.to(dtype)
     
     V = torch.randn(N, N, N, N, N, dtype=dtype)
-    QL, exprs = init_kron(V, 1.0, float("inf"), float("inf"))
+    QL, exprs = init_kron(V, 1.0, float("inf"), float("inf"), dQ="QEP")
     errs = []
     for i in range(num_iterations):
         V = torch.randn(N, N, N, N, N, dtype=dtype)
         G = opt_einsum.contract("aA,bB,cC,dD,eE, ABCDE->abcde", H1,H2,H3,H4,H5, V)  
-        update_precond_kron_newton_qep(QL, exprs, V, G, lr=0.01)
+        update_precond_kron_newton_qep(QL, exprs, V, G)
         precond_grad = precond_grad_kron(QL, exprs, G)
         err = torch.mean((precond_grad - V)**2).item()
         errs.append(err)
@@ -64,12 +64,12 @@ for dtype in [torch.float64, torch.float32]:
     H1, H2, H3, H4, H5 = H1.to(dtype), H2.to(dtype), H3.to(dtype), H4.to(dtype), H5.to(dtype)
       
     V = torch.randn(N, N, N, N, N, dtype=dtype)
-    QL, exprs = init_kron(V, 1.0, float("inf"), float("inf"))
+    QL, exprs = init_kron(V, 1.0, float("inf"), float("inf"), dQ="QEP")
     errs = []
     for i in range(num_iterations):
         V = torch.randn(N, N, N, N, N, dtype=dtype)
         G = opt_einsum.contract("aA,bB,cC,dD,eE, ABCDE->abcde", H1,H2,H3,H4,H5, V)  
-        precond_grad = precond_grad_kron_whiten_qep(QL, exprs, G, lr=0.01)
+        precond_grad = precond_grad_kron_whiten_qep(QL, exprs, G)
         err = torch.mean((precond_grad - V)**2).item()
         errs.append(err)
     plt.semilogy(errs)
