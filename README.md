@@ -1,5 +1,5 @@
 ## Pytorch implementation of PSGD 
-PSGD is [reimplemented](https://github.com/lixilinx/psgd_torch/blob/master/psgd.py), and supports: 1) two types of preconditioners (Newton and gradient/momentum whitening); 2) three forms of $Q$ (Kronecker product, low rank approximation and dense matrices); 3) and two kinds of local coordinates for $Q$ ($dQ=EQ$ and $dQ=QEP$). Choice $dQ=EQ$ requires triangular solver (backward substitution) to update $Q$, while $dQ=QEP$ only needs matmul to update $Q$.  
+The [old PSGD implementation](https://github.com/lixilinx/psgd_torch/blob/master/preconditioned_stochastic_gradient_descent.py) is deprecated. The [new PSGD implementation](https://github.com/lixilinx/psgd_torch/blob/master/psgd.py) is a superset of the old one, and further supports three more matmul-only/tri-solver-free methods for updating $Q$.  
 
 ### An overview
 PSGD (Preconditioned SGD) is a general purpose (mathematical and stochastic, convex and nonconvex) 2nd order optimizer. It reformulates a wide range of preconditioner estimation and Hessian fitting problems as a family of strongly convex Lie group optimization problems. 
@@ -11,7 +11,7 @@ The PSGD theory has two orthogonal parts: criteria for preconditioner fitting an
 
 #### Criteria for preconditioner fitting 
 
-PSGD was originally designed for preconditioning the gradient such that metrics of the spaces of preconditioned gradient and parameters are matched, i.e., $E_{\delta \theta, z}[(P\delta g)(P\delta g)^T] = E_{\delta \theta, z}[\delta \theta \delta \theta^T]$, where $\delta$ denotes the perturbation operation and $P$ is symmetric positive definite (SPD). This leads to the original preconditioner fitting criterion $E_{\delta\theta, z}[\delta g^T P \delta g + \delta \theta^T P^{-1} \delta \theta]$ [ref](https://arxiv.org/abs/1512.04202). The finite-difference notation may not be common in machine learning (ML). But, note that PSGD was invented before popular automatic differentiation (AD) tools like Tensorflow. Manually calculating the Hvp was cubersome then. With AD, we can simply replace pair $(\delta \theta, \delta g)$ with $(v, h)$ to obtain the Newton-style preconditioner fitting criterion $E_{v, z}[h^T P h + v^T P^{-1} v]$. For the gradient whitening preconditioner, we just replace pair $(\delta \theta, \delta g)$ with $(v, g)$ to have criterion $E_{v, z}[g^T P g + v^T P^{-1} v]$ [ref](https://arxiv.org/abs/1809.10232), where $v$ is an auxiliary variable and can be optionally integrated out as it is indepedent of $g$. 
+PSGD was originally designed for preconditioning the gradient such that metrics of the spaces of preconditioned gradient and parameters are matched, i.e., $E_{\delta \theta, z}[(P\delta g)(P\delta g)^T] = E_{\delta \theta, z}[\delta \theta \delta \theta^T]$, where $\delta$ denotes the perturbation operation and $P$ is symmetric positive definite (SPD). This leads to the original preconditioner fitting criterion $E_{\delta\theta, z}[\delta g^T P \delta g + \delta \theta^T P^{-1} \delta \theta]$ [ref](https://arxiv.org/abs/1512.04202). The finite-difference notation may not be common in machine learning (ML). But, note that PSGD was invented before popular automatic differentiation (AD) tools like Tensorflow. Manually calculating the Hvp was cubersome then. With AD, we can simply replace pair $(\delta \theta, \delta g)$ with $(v, h)$ to obtain the Newton-style preconditioner fitting criterion $E_{v, z}[h^T P h + v^T P^{-1} v]$. For the gradient/momentum whitening preconditioner, we just replace pair $(\delta \theta, \delta g)$ with $(v, g)$ to have criterion $E_{v, z}[g^T P g + v^T P^{-1} v]$ [ref](https://arxiv.org/abs/1809.10232), where $v$ is an auxiliary variable and can be optionally integrated out as it is indepedent of $g$. 
 
 <!--For optimizing the negative-logarithm-likelihood (NLL) losses and losses with only sub-gradients, the gradient whitening preconditioner is recommended. The Newton-type preconditioner is good for minimizing any smooth losses.-->
 
@@ -50,7 +50,7 @@ Note 1: $v$ can be a nuisance or an auxiliary variable in the last two criteria 
 | $Q=(I+UV^T){\rm diag}(d)$, $U, V \in \mathbb{R}^{n\times r}$, $0\le r\ll n$ | $a=Qh$, $b=Q^{-T}v$, $Q\leftarrow Q-\mu{\rm diag}(a^2-b^2)Q/\max(a^2+b^2)$, $U\leftarrow U - \mu\frac{(aa^T-bb^T)V(I+V^TU)}{\lVert a\rVert \\, \lVert VV^Ta \rVert + \lVert b\rVert \\, \lVert VV^Tb\rVert }$, $V\leftarrow V - \mu\frac{ (I+VU^T)(aa^T-bb^T)U }{\lVert a\rVert \\, \lVert UU^Ta\rVert + \lVert b\rVert \\, \lVert UU^Tb\rVert}$ | $\mathcal{O}(rm^2)$ | $\mathcal{O}(rm^2)$ | LRAWhiten/Newton  |  
 | ${\rm diag}(q_1)\otimes{\rm diag}(q_2)\otimes\ldots$ | same as kron | $\mathcal{O}(m)$ | $\mathcal{O}(m^2)$ | KronWhiten/Newton | 
 
-Note 1: The matmul only (tri-solver-free) preconditioner update methods with local coordinate $dQ = QEP$ have similar forms and complexities. 
+Note 1: The other three more matmul-only (tri-solver-free) preconditioner update methods have similar forms and complexities ([ref](https://arxiv.org/abs/2402.11858) to be updated). 
 
 Note 2: For the gradient/momentum whitening preconditioner, we simply replace pair $(v, h)$ with $(v, g)$, where $v$ is a dummy variable that can be optionally integrated out. 
 
@@ -65,9 +65,9 @@ E_v[B^HB] &= {\rm tr}\left(Q_2^{-1}Q_2^{-H}\right) \\, Q_1^{-H}Q_1^{-1}
 
 <!--The default behavior is to keep $v$ as an auxiliary variable. For class *Kron*, setting $v$ to None will integrate it out. -->
 
-#### Preconditioner fitting accuracy   
+#### Hessian fitting accuracy   
 
-[This script](https://github.com/lixilinx/psgd_torch/blob/master/misc/psgd_numerical_stability.py) generates the following plot showing the typical behaviors of different preconditioner fitting methods. 
+[This script](https://github.com/lixilinx/psgd_torch/blob/master/misc/psgd_numerical_stability.py) generates the following plot showing the typical behaviors of different Hessian fitting methods. 
 
 * With a static and noise-free Hessian-vector product model, both BFGS and PSGD converge linearly to the optimal preconditioner while closed-form solution $P=\left(E[hh^T]\right)^{-0.5}$ only converges sublinearly with rate $\mathcal{O}(1/t)$.
 * With a static additive noisy Hessian-vector model $h=Hv+\epsilon$, BFGS diverges easily. With a constant step size $\mu$, the steady-state fitting errors of PSGD are proportional  to $\mu$. 
@@ -87,6 +87,11 @@ A few more details. The Hessian-vector products are calculated as a vector-jacob
 
 ### Demos 
 
+There are plenty of demos: [Rosenbrock function minimization](https://github.com/lixilinx/psgd_torch/blob/master/hello_psgd.py), [vision transformer](https://github.com/lixilinx/psgd_torch/blob/master/misc/vit.py), [generative pre-trained transformer](https://github.com/lixilinx/psgd_torch/blob/master/misc/gpt2.py), [logistic regression](https://github.com/lixilinx/psgd_torch/blob/master/misc/mnist_logistic_regression.py), [tensor rank decomposition](https://github.com/lixilinx/psgd_torch/blob/master/demo_usage_of_all_preconditioners.py), etc.. For this tiny [vision transformer demo](https://github.com/lixilinx/psgd_torch/blob/master/misc/vit.py), the following results show that all the four PSGD-Kron-gradient-whitening preconditioners can improve the convergence a lot compared with Adam(W).      
+
+<img src="https://drive.google.com/file/d/1nOnl8MW2OdWGriyR1rn3DqEJ8IqMwoG4/view?usp=drive_link" width=90% height=90%>
+
+<!--
 [Rosenbrock function](https://github.com/lixilinx/psgd_torch/blob/master/hello_psgd.py): see how simple to apply PSGD to convex and stochastic optimizations. The most important three settings are: preconditioner_init_scale (unnormalized), lr_params (normalized) and lr_preconditioner (normalized). 
 
 [LeNet5 CNN](https://github.com/lixilinx/psgd_torch/blob/master/mnist_with_lenet5.py): PSGD on convolutional neural network training with the classic LeNet5 for MNIST digits recognition. Also see [this](https://github.com/lixilinx/psgd_torch/blob/master/misc/affine_wrapping_F_conv2d.py) for another implementation and comparison with Shampoo (PSGD generalizes better). 
@@ -110,11 +115,12 @@ A few more details. The Hessian-vector products are calculated as a vector-jacob
 [How PSGD generalizes so well](https://github.com/lixilinx/psgd_torch/blob/master/misc/how_psgd_generalize.py): We know SGD generalizes. This one serves as a good toy example illustrating it in the view of information theory. Starting from the same initial guesses, PSGD tends to find minima with smaller train cross entropy and flatter Hessians than Adam. Thus shorter total description lengths for the train data and model parameters. See [sample results](https://github.com/lixilinx/psgd_torch/blob/master/misc/how_psgd_generalize.svg). Similarly, [this example](https://github.com/lixilinx/psgd_torch/blob/master/misc/affine_wrapping_F_conv2d.py) shows that PSGD also generalizes better than Shampoo. 
 
 [Wrapping as affine models](https://github.com/lixilinx/psgd_torch/blob/master/misc/affine_wrapping_F_conv2d.py): this demo shows how to wrap torch.nn.functional.conv2d as an affine Conv2d class by putting weights and bias together. [Another one](https://github.com/lixilinx/psgd_torch/blob/master/misc/affine_wrapping_VF_rnn_tanh.py) on wrapping torch._VF.rnn_tanh as an affine RNN class. It's tedious and also maybe unnecessary as the Kron preconditioners natively support tensors of any shape. Still, reformulating our model as a list of affine transforms can make the best use of Kron preconditioners and typically improves performance.   
+-->
 
 ### Resources
 1) Preconditioned stochastic gradient descent, [arXiv:1512.04202](https://arxiv.org/abs/1512.04202), 2015. (General ideas of PSGD, preconditioner fitting criteria and Kronecker product preconditioners.)
 2) Preconditioner on matrix Lie group for SGD, [arXiv:1809.10232](https://arxiv.org/abs/1809.10232), 2018. (Focus on affine Lie group preconditioners, including feature normalization or whitening (per batch or layer) as special affine preconditioners. Use PSGD for gradient whitening.)
 3) Black box Lie group preconditioners for SGD, [arXiv:2211.04422](https://arxiv.org/abs/2211.04422), 2022. (Mainly about the LRA preconditioner. I also have prepared [these supplementary materials](https://drive.google.com/file/d/1CTNx1q67_py87jn-0OI-vSLcsM1K7VsM/view) for detailed math derivations.)
-4) Stochastic Hessian fittings with Lie groups, [arXiv:2402.11858](https://arxiv.org/abs/2402.11858), 2024. (Convergence properties of PSGD, also a good summary of PSGD. The Hessian fitting problem is convex in the Euclidean space and the manifold of SPD matrices, but it's strongly convex only in the quotient set ${\rm GL}(n, \mathbb{R})/R_{\rm polar}$, or group ${\rm GL}(n, \mathbb{R})$ if we don't care $Q$'s rotation ambiguity.)
+4) Stochastic Hessian fittings with Lie groups, [arXiv:2402.11858](https://arxiv.org/abs/2402.11858), 2024 (to be updated). (Convergence properties of PSGD, also a good summary of PSGD. The Hessian fitting problem is convex in the Euclidean space and the manifold of SPD matrices, but it's strongly convex only in the quotient set ${\rm GL}(n, \mathbb{R})/R_{\rm polar}$, or group ${\rm GL}(n, \mathbb{R})$ if we don't care $Q$'s rotation ambiguity.)
 5) Curvature-informed SGD via general purpose Lie-group preconditioners, [arXiv:2402.04553](https://arxiv.org/abs/2402.04553), 2024. (Plenty of benchmark results and analyses for PSGD vs. other optimizers.)
 6) There are a few more efficient and specialized PSGD implementations: Evan's [JAX](https://github.com/evanatyourservice/psgd_jax) and [Torch](https://github.com/evanatyourservice/kron_torch) versions, Lucas' [Heavyball](https://github.com/ClashLuke/HeavyBall). Also my outdated and unmaintained Tensorflow code: [TF 1.x](https://github.com/lixilinx/psgd_tf/releases/tag/1.3) and [TF 2.x](https://github.com/lixilinx/psgd_tf). 
