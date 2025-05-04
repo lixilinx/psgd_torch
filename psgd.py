@@ -14,7 +14,7 @@ The new PSGD-Kron Newton/Whitening preconditioners support four kinds of local c
 
     QEP):   dQ = Q * mathcal{E} * P
     This last choice works very well if it does. 
-    But, we do not recommend it as Q can get trapped around ill-conditioned matrices. 
+    But, one drawback is that Q might get trapped around ill-conditioned matrices. 
 
 The PSGD-LRA Newton/Whitening preconditioners still adopts local coordinate dQ = mathcal{E} * Q, 
 and needs a small linear solver to update the preconditioner.
@@ -49,7 +49,7 @@ def norm_lower_bound_herm(A):
 #############       Begin of PSGD Kronecker product preconditioners       #############         
 
 
-def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QUAD"):
+def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QE"):
     """
     For a scalar or tensor t, we initialize its states (preconditioner Q and Lipschitz constant L), 
     and reusable contraction expressions for updating Q and preconditioning gradient.
@@ -332,12 +332,12 @@ def precond_grad_kron_whiten_quad(QL, exprs, G, lr=0.1, updateP=True):
 class KronWhiten:
     """
     Implements the PSGD optimizer with the Kronecker product gradient/momentum whitening preconditioner.
-    By default, we whiten the gradient and update P with a quadratic form for dP. 
+    By default, we whiten the gradient and update Q in the Lie group with form dQ = Q*E. 
     """
     def __init__(self,  params_with_grad, 
                  preconditioner_max_size=float("inf"), preconditioner_max_skew=1.0, preconditioner_init_scale:float|None=None,
                  lr_params=0.001, lr_preconditioner=0.1, momentum=0.0,
-                 grad_clip_max_norm:float|None=None, preconditioner_update_probability=1.0, whiten_grad=True, dQ="QUAD"):
+                 grad_clip_max_norm:float|None=None, preconditioner_update_probability=1.0, whiten_grad=True, dQ="QE"):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner 
@@ -349,7 +349,6 @@ class KronWhiten:
         self._preconditioner_max_skew = preconditioner_max_skew
         params_with_grad = [params_with_grad,] if isinstance(params_with_grad, torch.Tensor) else params_with_grad
         self._params_with_grad = [param for param in params_with_grad if param.requires_grad] # double check requires_grad flag 
-        self._tiny = max([torch.finfo(p.dtype).tiny for p in self._params_with_grad])
         if preconditioner_init_scale is None:
             self._QLs_exprs = None # initialize on the fly 
             print("FYI: Will set the preconditioner initial scale on the fly. Recommend to set it manually.")
@@ -406,12 +405,11 @@ class KronWhiten:
         else: # already whitened gradients, just clear the momentum buffers and counter.  
             self._ms, self._counter_m = None, 0              
             
-        # gradient clipping is optional
-        if self.grad_clip_max_norm is None:
-            lr = self.lr_params
-        else:
-            grad_norm = torch.sqrt(torch.abs(sum([torch.sum(g*g.conj()) for g in pre_grads]))) + self._tiny
-            lr = self.lr_params * min(self.grad_clip_max_norm/grad_norm, 1.0)
+        lr = self.lr_params
+        if self.grad_clip_max_norm is not None:
+            grad_norm = torch.sqrt(torch.abs(sum([torch.sum(g*g.conj()) for g in pre_grads])))
+            if grad_norm > self.grad_clip_max_norm:
+                lr = lr * self.grad_clip_max_norm / grad_norm
             
         # Update the parameters
         [param.subtract_(lr*g) for (param, g) in zip(self._params_with_grad, pre_grads)]
@@ -501,13 +499,13 @@ def update_precond_kron_newton_quad(QL, exprs, V, Hvp, lr=0.1):
 class KronNewton:
     """
     Implements the Kronecker product Newton-type preconditioner as a class.
-    By default, we update Q with a quadratic form for dQ. 
+    By default, we update Q in the Lie group with form dQ = Q*E.  
     Be extra cautious when using the finite difference method for Hvp approximation (the closure must behave like a pure function). 
     """
     def __init__(self,  params_with_grad, preconditioner_max_size=float("inf"), preconditioner_max_skew=1.0, preconditioner_init_scale:float|None=None,
                         lr_params=0.01, lr_preconditioner=0.1, momentum=0.0,
                         grad_clip_max_norm:float|None=None, preconditioner_update_probability=1.0,
-                        exact_hessian_vector_product=True, dQ="QUAD"):
+                        exact_hessian_vector_product=True, dQ="QE"):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner        
@@ -519,7 +517,6 @@ class KronNewton:
         self._preconditioner_max_skew = preconditioner_max_skew
         params_with_grad = [params_with_grad,] if isinstance(params_with_grad, torch.Tensor) else params_with_grad
         self._params_with_grad = [param for param in params_with_grad if param.requires_grad] # double check requires_grad flag 
-        self._tiny = max([torch.finfo(p.dtype).tiny for p in self._params_with_grad])
         self._delta_param_scale = (max([torch.finfo(p.dtype).eps for p in self._params_with_grad])) ** 0.5
         if preconditioner_init_scale is None:
             self._QLs_exprs = None # initialize on the fly 
@@ -597,11 +594,11 @@ class KronNewton:
             self._ms, self._counter_m = None, 0 # clear the buffer and counter when momentum is set to zero 
             pre_grads = [self._precond_grad(*QL_exprs, g) for (QL_exprs, g) in zip(self._QLs_exprs, grads)]
             
-        if self.grad_clip_max_norm is None: # no grad clipping 
-            lr = self.lr_params
-        else: # grad clipping 
-            grad_norm = torch.sqrt(torch.abs(sum([torch.sum(g*g.conj()) for g in pre_grads]))) + self._tiny
-            lr = self.lr_params * min(self.grad_clip_max_norm/grad_norm, 1.0)
+        lr = self.lr_params
+        if self.grad_clip_max_norm is not None:
+            grad_norm = torch.sqrt(torch.abs(sum([torch.sum(g*g.conj()) for g in pre_grads])))
+            if grad_norm > self.grad_clip_max_norm:
+                lr = lr * self.grad_clip_max_norm / grad_norm
             
         # Update the parameters. 
         [param.subtract_(lr*g) for (param, g) in zip(self._params_with_grad, pre_grads)]
@@ -714,15 +711,15 @@ class LRAWhiten:
         params_with_grad = [params_with_grad,] if isinstance(params_with_grad, torch.Tensor) else params_with_grad
         self._params_with_grad = [param for param in params_with_grad if param.requires_grad] # double check requires_grad flag
         dtype, device = self._params_with_grad[0].dtype, self._params_with_grad[0].device
-        self._tiny = torch.finfo(dtype).tiny
         self._param_sizes = [torch.numel(param) for param in self._params_with_grad]
         self._param_cumsizes = torch.cumsum(torch.tensor(self._param_sizes), 0)
         num_params = self._param_cumsizes[-1]
-        if 2 * rank_of_approximation + 1 >= num_params: # check the rank_of_approximation setting 
-            print("FYI: rank r is too high.")
+        assert 0 <= rank_of_approximation < num_params
         self._UVd = [] # saves U, V and d
-        self._UVd.append(torch.randn(num_params, rank_of_approximation, dtype=dtype, device=device) / (num_params*rank_of_approximation)**0.5) # U
-        self._UVd.append(self._UVd[0].clone()) # V
+        self._UVd.append(torch.randn(num_params, rank_of_approximation, dtype=dtype, device=device)) # U
+        self._UVd[0] /= torch.linalg.vector_norm(self._UVd[0])
+        self._UVd.append(torch.randn(num_params, rank_of_approximation, dtype=dtype, device=device)) # V
+        self._UVd[1] /= torch.linalg.vector_norm(self._UVd[1])
         if preconditioner_init_scale is None:
             print("FYI: Will set the preconditioner initial scale on the fly. Recommend to set it manually.")
         else:
@@ -774,11 +771,11 @@ class LRAWhiten:
         else: # already whitened the gradient; just clear the buffer and counter when momentum is set to zero 
             self._m, self._counter_m = None, 0 
             
-        if self.grad_clip_max_norm is None: # no grad clipping 
-            lr = self.lr_params
-        else: # grad clipping 
-            grad_norm = torch.linalg.vector_norm(pre_grad) + self._tiny
-            lr = self.lr_params * min(self.grad_clip_max_norm/grad_norm, 1.0)
+        lr = self.lr_params
+        if self.grad_clip_max_norm is not None:
+            grad_norm = torch.linalg.vector_norm(pre_grad)
+            if grad_norm > self.grad_clip_max_norm:
+                lr = lr * self.grad_clip_max_norm / grad_norm
             
         # update the parameters 
         [param.subtract_(lr * pre_grad[j - i:j].view_as(param)) 
@@ -808,16 +805,16 @@ class LRANewton:
         params_with_grad = [params_with_grad,] if isinstance(params_with_grad, torch.Tensor) else params_with_grad
         self._params_with_grad = [param for param in params_with_grad if param.requires_grad] # double check requires_grad flag
         dtype, device = self._params_with_grad[0].dtype, self._params_with_grad[0].device
-        self._tiny = torch.finfo(dtype).tiny
         self._delta_param_scale = torch.finfo(dtype).eps**0.5
         self._param_sizes = [torch.numel(param) for param in self._params_with_grad]
         self._param_cumsizes = torch.cumsum(torch.tensor(self._param_sizes), 0)
         num_params = self._param_cumsizes[-1]
-        if 2 * rank_of_approximation + 1 >= num_params: # check the rank_of_approximation setting 
-            print("FYI: rank r is too high. DenseNewton might be a better choice.")
+        assert 0 <= rank_of_approximation < num_params
         self._UVd = [] # saves U, V and d
-        self._UVd.append(torch.randn(num_params, rank_of_approximation, dtype=dtype, device=device) / (num_params*rank_of_approximation)**0.5) # U
-        self._UVd.append(self._UVd[0].clone()) # V
+        self._UVd.append(torch.randn(num_params, rank_of_approximation, dtype=dtype, device=device)) # U
+        self._UVd[0] /= torch.linalg.vector_norm(self._UVd[0])
+        self._UVd.append(torch.randn(num_params, rank_of_approximation, dtype=dtype, device=device)) # V
+        self._UVd[1] /= torch.linalg.vector_norm(self._UVd[1])
         if preconditioner_init_scale is None:
             print("FYI: Will set the preconditioner initial scale on the fly. Recommend to set it manually.")
         else:
@@ -886,11 +883,11 @@ class LRANewton:
             self._m, self._counter_m = None, 0 # clear the buffer and counter when momentum is set to zero 
             pre_grad = precond_grad_lra(self._UVd, grad)
             
-        if self.grad_clip_max_norm is None: # no grad clipping 
-            lr = self.lr_params
-        else: # clip grad 
-            grad_norm = torch.linalg.vector_norm(pre_grad) + self._tiny
-            lr = self.lr_params * min(self.grad_clip_max_norm/grad_norm, 1.0)
+        lr = self.lr_params
+        if self.grad_clip_max_norm is not None:
+            grad_norm = torch.linalg.vector_norm(pre_grad)
+            if grad_norm > self.grad_clip_max_norm:
+                lr = lr * self.grad_clip_max_norm / grad_norm
             
         # update the parameters
         [param.subtract_(lr * pre_grad[j - i:j].view_as(param)) 
@@ -954,7 +951,7 @@ def update_precond_dense_quad(Q, L, v, h, lr=0.1):
 class DenseNewton:
     """
     Implements the PSGD dense matrix Newton-type preconditioner as a class. 
-    By default, we update Q with a quadratic form for dQ. 
+    By default, we update Q in the Lie group with form dQ = Q*E. 
     Be extra cautious when using the finite difference method for Hvp approximation (the closure must behave like a pure function).
     It's mainly for illustrating how PSGD works due to its simplicity. 
     It's also a good alternative to the BFGS like quasi-Newton methods as no line search is required. 
@@ -962,7 +959,7 @@ class DenseNewton:
     def __init__(self, params_with_grad, preconditioner_init_scale:float|None=None,
                  lr_params=0.01, lr_preconditioner=0.1, momentum=0.0, 
                  grad_clip_max_norm:float|None=None, preconditioner_update_probability=1.0,
-                 exact_hessian_vector_product=True, dQ="QUAD"):
+                 exact_hessian_vector_product=True, dQ="QE"):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner
@@ -973,7 +970,6 @@ class DenseNewton:
         params_with_grad = [params_with_grad,] if isinstance(params_with_grad, torch.Tensor) else params_with_grad
         self._params_with_grad = [param for param in params_with_grad if param.requires_grad]  # double check requires_grad flag
         dtype, device = self._params_with_grad[0].dtype, self._params_with_grad[0].device
-        self._tiny = torch.finfo(dtype).tiny
         self._delta_param_scale = torch.finfo(dtype).eps ** 0.5
         self._param_sizes = [torch.numel(param) for param in self._params_with_grad]
         self._param_cumsizes = torch.cumsum(torch.tensor(self._param_sizes), 0)
@@ -984,7 +980,7 @@ class DenseNewton:
             if dQ == "QUAD": # Q actually is P 
                 preconditioner_init_scale *= preconditioner_init_scale
             self._Q = torch.eye(num_params, dtype=dtype, device=device) * preconditioner_init_scale
-        self._L = torch.zeros([]) # Lipschitz constant estimation for the psgd criterion 
+        self._L = torch.zeros([], dtype=dtype, device=device) # Lipschitz constant estimation for the psgd criterion 
         self._m, self._counter_m = None, 0 # buffer and counter for momentum 
         self._exact_hessian_vector_product = exact_hessian_vector_product
         if not exact_hessian_vector_product:
@@ -1064,11 +1060,11 @@ class DenseNewton:
             self._m, self._counter_m = None, 0 # clear the buffer and counter when momentum is set to zero 
             pre_grad = self._precond_grad(self._Q, grad)
         
-        if self.grad_clip_max_norm is None: # no grad clipping 
-            lr = self.lr_params
-        else: # grad clipping 
-            grad_norm = torch.linalg.vector_norm(pre_grad) + self._tiny
-            lr = self.lr_params * min(self.grad_clip_max_norm / grad_norm, 1.0)
+        lr = self.lr_params
+        if self.grad_clip_max_norm is not None:
+            grad_norm = torch.linalg.vector_norm(pre_grad)
+            if grad_norm > self.grad_clip_max_norm:
+                lr = lr * self.grad_clip_max_norm / grad_norm
 
         # update the parameters
         [param.subtract_(lr * pre_grad[j - i:j].view_as(param)) 
