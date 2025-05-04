@@ -10,6 +10,7 @@ import sys
 import time
 
 import matplotlib.pyplot as plt
+import numpy as np 
 import torch
 import torchvision
 import torchvision.transforms as transforms
@@ -18,7 +19,7 @@ from einops.layers.torch import Rearrange
 from torch import nn
 
 sys.path.append("..")
-import preconditioned_stochastic_gradient_descent as psgd
+import psgd
 
 device = torch.device("cuda")
 
@@ -252,6 +253,7 @@ Now we compare Adam(W) (the default optimizer for transformer) and PSGD.
 We align their settings, and the only difference is their preconditioners.  
 """
 num_epochs = 100
+plt.figure(figsize=(8, 4))
 ax1 = plt.subplot(121)
 ax2 = plt.subplot(122)
 ax1.yaxis.tick_right()
@@ -294,9 +296,10 @@ for epoch in range(num_epochs):
 
 total_time = time.time() - t0
 
+SmoothedTrainLoss = np.convolve(TrainLoss, np.ones(100)/100)[99:-99]
 ax1.plot(
-    torch.arange(1, len(TrainLoss) + 1).cpu() * total_time / len(TrainLoss),
-    TrainLoss,
+    torch.arange(1, len(SmoothedTrainLoss) + 1).cpu() * total_time / len(SmoothedTrainLoss),
+    SmoothedTrainLoss,
 )
 ax2.plot(
     torch.arange(1, len(TestAcc) + 1).cpu() * total_time / len(TestAcc),
@@ -305,62 +308,63 @@ ax2.plot(
 
 
 """
-PSGD 
+PSGD, Kron, gradient whitening, dQ={EQ, QE, QUAD, QEP}
 """
-net = copy.deepcopy(Net).to(device)
-
-lr0 = 1e-3  # keep the same as Adam
-opt = psgd.Affine(
-    net.parameters(),
-    preconditioner_init_scale=1.0,
-    preconditioner_max_skew=10.0,  # use diag preconditioner for the larger dim
-    lr_params=lr0,  # will aneal to lr0/num_epochs
-    lr_preconditioner=0.1,  # will anneal to 0.01
-    preconditioner_update_probability=1.0,  # will anneal to 0.01
-    momentum=0.9,
-    preconditioner_type="whitening",
-)
-
-TrainLoss = []
-TestAcc = []
-
-t0 = time.time()
-for epoch in range(num_epochs):
-    """train"""
-    net.train()
-    for _, (inputs, targets) in enumerate(train_loader):
-        inputs, targets = inputs.to(device), targets.to(device)
-
-        def closure():
-            outputs = net(inputs)
-            loss = nn.functional.cross_entropy(outputs, targets)
-            return loss
-
-        loss = opt.step(closure)
-        TrainLoss.append(loss.item())
-
-    """test"""
-    net.eval()
-    test_acc = test(net, test_loader)
-    TestAcc.append(test_acc)
-    print(f"PSGD, epoch {epoch + 1}, best test accuracy {max(TestAcc)}")
-
-    opt.lr_params -= lr0 / num_epochs
-    opt.lr_preconditioner = max(0.01, 0.1**0.05 * opt.lr_preconditioner)
-    opt.preconditioner_update_probability = max(
-        0.01, 0.1**0.1 * opt.preconditioner_update_probability
+for dQ in ["EQ", "QE", "QUAD", "QEP"]:
+    net = copy.deepcopy(Net).to(device)
+    
+    lr0 = 1e-3  # keep the same as Adam
+    opt = psgd.KronWhiten(
+        net.parameters(),
+        preconditioner_init_scale=1.0,
+        lr_params=lr0,  # will aneal to lr0/num_epochs
+        lr_preconditioner=0.1,  # will anneal to 0.01
+        preconditioner_update_probability=1.0,  # will anneal to 0.01
+        momentum=0.9,
+        dQ=dQ,
     )
-
-total_time = time.time() - t0
-
-ax1.plot(
-    torch.arange(1, len(TrainLoss) + 1).cpu() * total_time / len(TrainLoss),
-    TrainLoss,
-)
-ax2.plot(
-    torch.arange(1, len(TestAcc) + 1).cpu() * total_time / len(TestAcc),
-    TestAcc,
-)
+    
+    TrainLoss = []
+    TestAcc = []
+    
+    t0 = time.time()
+    for epoch in range(num_epochs):
+        """train"""
+        net.train()
+        for _, (inputs, targets) in enumerate(train_loader):
+            inputs, targets = inputs.to(device), targets.to(device)
+    
+            def closure():
+                outputs = net(inputs)
+                loss = nn.functional.cross_entropy(outputs, targets)
+                return loss
+    
+            loss = opt.step(closure)
+            TrainLoss.append(loss.item())
+    
+        """test"""
+        net.eval()
+        test_acc = test(net, test_loader)
+        TestAcc.append(test_acc)
+        print(f"PSGD, epoch {epoch + 1}, best test accuracy {max(TestAcc)}")
+    
+        opt.lr_params -= lr0 / num_epochs
+        opt.lr_preconditioner = max(0.01, 0.1**0.05 * opt.lr_preconditioner)
+        opt.preconditioner_update_probability = max(
+            0.01, 0.1**0.1 * opt.preconditioner_update_probability
+        )
+    
+    total_time = time.time() - t0
+    
+    SmoothedTrainLoss = np.convolve(TrainLoss, np.ones(100)/100)[99:-99]
+    ax1.plot(
+        torch.arange(1, len(SmoothedTrainLoss) + 1).cpu() * total_time / len(SmoothedTrainLoss),
+        SmoothedTrainLoss,
+    )
+    ax2.plot(
+        torch.arange(1, len(TestAcc) + 1).cpu() * total_time / len(TestAcc),
+        TestAcc,
+    )
 
 
 ax1.set_xlabel("Wall time (s)", fontsize=6)
@@ -369,7 +373,10 @@ ax1.tick_params(labelsize=6)
 ax1.legend(
     [
         "Adam",
-        "PSGD",
+        "PSGD, EQ",
+        "PSGD, QE",
+        "PSGD, QUAD",
+        "PSGD, QEP",
     ],
     fontsize=7,
 )
@@ -381,7 +388,10 @@ ax2.tick_params(labelsize=6)
 ax2.legend(
     [
         "Adam",
-        "PSGD",
+        "PSGD, EQ",
+        "PSGD, QE",
+        "PSGD, QUAD",
+        "PSGD, QEP",
     ],
     fontsize=7,
 )
