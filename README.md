@@ -89,7 +89,7 @@ A few more details. The Hessian-vector products are calculated as a vector-jacob
 
 There are plenty of demos: [Rosenbrock function minimization](https://github.com/lixilinx/psgd_torch/blob/master/hello_psgd.py), [vision transformer](https://github.com/lixilinx/psgd_torch/blob/master/misc/vit.py), [generative pre-trained transformer](https://github.com/lixilinx/psgd_torch/blob/master/misc/gpt2.py), [logistic regression](https://github.com/lixilinx/psgd_torch/blob/master/misc/mnist_logistic_regression.py), [tensor rank decomposition](https://github.com/lixilinx/psgd_torch/blob/master/demo_usage_of_all_preconditioners.py), etc.. For this tiny [vision transformer demo](https://github.com/lixilinx/psgd_torch/blob/master/misc/vit.py), the following results show that all the four PSGD-Kron-gradient-whitening preconditioners can improve the convergence a lot compared with Adam(W).      
 
-<img src="https://drive.google.com/file/d/1nOnl8MW2OdWGriyR1rn3DqEJ8IqMwoG4/view?usp=drive_link" width=90% height=90%>
+<img src="https://github.com/lixilinx/psgd_torch/blob/master/misc/vit_adam_vs_psgd.svg" width=70% height=70%>
 
 <!--
 [Rosenbrock function](https://github.com/lixilinx/psgd_torch/blob/master/hello_psgd.py): see how simple to apply PSGD to convex and stochastic optimizations. The most important three settings are: preconditioner_init_scale (unnormalized), lr_params (normalized) and lr_preconditioner (normalized). 
