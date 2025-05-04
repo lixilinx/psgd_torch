@@ -14,7 +14,7 @@ The new PSGD-Kron Newton/Whitening preconditioners support four kinds of local c
 
     QEP):   dQ = Q * mathcal{E} * P
     This last choice works very well if it does. 
-    But, one drawback is that Q might get trapped around ill-conditioned matrices. 
+    But, one drawback is that Q might get stuck around ill-conditioned matrices. 
 
 The PSGD-LRA Newton/Whitening preconditioners still adopts local coordinate dQ = mathcal{E} * Q, 
 and needs a small linear solver to update the preconditioner.
@@ -23,8 +23,8 @@ I also keep the PSGD dense matrix Newton-type preconditioner here to illustrate 
 It supports all the four sets of local coordinates for updating Q/P, 
 and can be a good alternative to the BFGS like quasi-Newton optimizers as no line search is required. 
 
-Xi-Lin Li, lixilinx@gmail.com; April and May, 2025. 
-Main refs: https://arxiv.org/abs/1512.04202; https://arxiv.org/abs/2402.11858 (needs updates). 
+Xi-Lin Li, lixilinx@gmail.com; in April and May, 2025. 
+Main refs: https://arxiv.org/abs/1512.04202; https://arxiv.org/abs/2402.11858 (to be updated). 
 """
 
 import opt_einsum
@@ -182,8 +182,8 @@ def update_precond_kron_eq(QL, exprs, V, Hvp, lr=0.1, for_whitening=False):
             return torch.linalg.solve_triangular(A, X[None,:], upper=True, left=False)[0]     
     
     A = exprA(*Q, Hvp)
-    if for_whitening: # Hvp actually is the gradient/momentum; P*h gives the preconditioned gradient/momentum.  
-        Pg = exprA(*[q.conj() if q.dim()<2 else q.H for q in Q], A)
+    # if for_whitening=True, Hvp actually is the gradient/momentum; P*h gives the preconditioned gradient/momentum.  
+    Pg = exprA(*[q.conj() if q.dim()<2 else q.H for q in Q], A) if for_whitening else None        
 
     order = V.dim()
     p = list(range(order))
@@ -198,7 +198,7 @@ def update_precond_kron_eq(QL, exprs, V, Hvp, lr=0.1, for_whitening=False):
         term2 = exprGs[i](conjB.conj(), conjB)
                    
         if q.dim() < 2: # q is a diagonal matrix or scalar preconditioner
-            ell = torch.max(torch.abs(term1 + term2))
+            ell = torch.max(torch.real(term1 + term2))
             L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
             q.sub_(lr/L[i] * (term1 - term2) * q)      
         else: # q is a matrix preconditioner 
@@ -209,10 +209,7 @@ def update_precond_kron_eq(QL, exprs, V, Hvp, lr=0.1, for_whitening=False):
     if torch.rand([]) < 0.01: # balance factors of Q
         balance_kron_precond(Q)
 
-    if for_whitening:
-        return Pg
-    # else:
-    #     return None 
+    return Pg
 
 
 def precond_grad_kron(QL, exprs, G):
@@ -253,7 +250,7 @@ def precond_grad_kron_whiten_qep(QL, exprs, G, lr=0.1, updateP=True):
             term1 = exprGs[i](QPg, QPg.conj())
             if q.dim() < 2: # diagonal or scalar Q 
                 term2 = total_numel/q.numel() * q * q.conj()
-                ell = torch.max(torch.abs(term1 + term2)) 
+                ell = torch.max(torch.real(term1 + term2)) 
                 L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
                 q.sub_(lr/L[i] * (term1 - term2) * q)
             else: # matrix Q
@@ -280,7 +277,7 @@ def precond_grad_kron_whiten_qe(QL, exprs, G, lr=0.1, updateP=True):
             term1 = exprGs[i](Pg, Pg.conj())
             if q.dim() < 2: # diagonal or scalar Q 
                 term2 = total_numel/q.numel() # times I
-                ell = torch.max(torch.abs(term1)) + term2 
+                ell = torch.max(torch.real(term1)) + term2 
                 L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
                 q.sub_(lr/L[i] * q * (term1 - term2))
             else: # matrix Q
@@ -310,7 +307,7 @@ def precond_grad_kron_whiten_quad(QL, exprs, G, lr=0.1, updateP=True):
             term1 = exprGs[i](Pg, Pg.conj())
             if q.dim() < 2: # diagonal or scalar Q 
                 term2 = total_numel/q.numel() # times I
-                ell = torch.max(torch.abs(term1)) + term2 
+                ell = torch.max(torch.real(term1)) + term2 
                 L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
                 gain = 1 - lr/2/L[i] * (term1 - term2)
                 q.mul_(gain * gain) 
@@ -337,7 +334,7 @@ class KronWhiten:
     def __init__(self,  params_with_grad, 
                  preconditioner_max_size=float("inf"), preconditioner_max_skew=1.0, preconditioner_init_scale:float|None=None,
                  lr_params=0.001, lr_preconditioner=0.1, momentum=0.0,
-                 grad_clip_max_norm:float|None=None, preconditioner_update_probability=1.0, whiten_grad=True, dQ="QE"):
+                 grad_clip_max_norm=float("inf"), preconditioner_update_probability=1.0, whiten_grad=True, dQ="QE"):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner 
@@ -406,8 +403,8 @@ class KronWhiten:
             self._ms, self._counter_m = None, 0              
             
         lr = self.lr_params
-        if self.grad_clip_max_norm is not None:
-            grad_norm = torch.sqrt(torch.abs(sum([torch.sum(g*g.conj()) for g in pre_grads])))
+        if self.grad_clip_max_norm < float("inf"):
+            grad_norm = torch.sqrt(torch.real(sum([torch.sum(g*g.conj()) for g in pre_grads])))
             if grad_norm > self.grad_clip_max_norm:
                 lr = lr * self.grad_clip_max_norm / grad_norm
             
@@ -435,7 +432,7 @@ def update_precond_kron_newton_qep(QL, exprs, V, Hvp, lr=0.1):
         term1 = exprGs[i](QPh, QPh.conj())
         term2 = exprGs[i](Qv, Qv.conj())
         if q.dim() < 2: # diagonal or scalar Q 
-            ell = torch.max(torch.abs(term1 + term2)) 
+            ell = torch.max(torch.real(term1 + term2)) 
             L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
             q.sub_(lr/L[i] * (term1 - term2) * q)
         else: # matrix Q
@@ -456,7 +453,7 @@ def update_precond_kron_newton_qe(QL, exprs, V, Hvp, lr=0.1):
         term1 = exprGs[i](Ph, Ph.conj())
         term2 = exprGs[i](V, V.conj())
         if q.dim() < 2: # diagonal or scalar Q 
-            ell = torch.max(torch.abs(term1 + term2)) 
+            ell = torch.max(torch.real(term1 + term2)) 
             L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
             q.sub_(lr/L[i] * q * (term1 - term2))
         else: # matrix Q
@@ -480,7 +477,7 @@ def update_precond_kron_newton_quad(QL, exprs, V, Hvp, lr=0.1):
         term1 = exprGs[i](Ph, Ph.conj())
         term2 = exprGs[i](V, V.conj())
         if q.dim() < 2: # diagonal or scalar Q 
-            ell = torch.max(torch.abs(term1 + term2)) 
+            ell = torch.max(torch.real(term1 + term2)) 
             L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
             gain = 1 - lr/2/L[i] * (term1 - term2)
             q.mul_(gain * gain)
@@ -504,7 +501,7 @@ class KronNewton:
     """
     def __init__(self,  params_with_grad, preconditioner_max_size=float("inf"), preconditioner_max_skew=1.0, preconditioner_init_scale:float|None=None,
                         lr_params=0.01, lr_preconditioner=0.1, momentum=0.0,
-                        grad_clip_max_norm:float|None=None, preconditioner_update_probability=1.0,
+                        grad_clip_max_norm=float("inf"), preconditioner_update_probability=1.0,
                         exact_hessian_vector_product=True, dQ="QE"):
         # mutable members
         self.lr_params = lr_params
@@ -595,8 +592,8 @@ class KronNewton:
             pre_grads = [self._precond_grad(*QL_exprs, g) for (QL_exprs, g) in zip(self._QLs_exprs, grads)]
             
         lr = self.lr_params
-        if self.grad_clip_max_norm is not None:
-            grad_norm = torch.sqrt(torch.abs(sum([torch.sum(g*g.conj()) for g in pre_grads])))
+        if self.grad_clip_max_norm < float("inf"):
+            grad_norm = torch.sqrt(torch.real(sum([torch.sum(g*g.conj()) for g in pre_grads])))
             if grad_norm > self.grad_clip_max_norm:
                 lr = lr * self.grad_clip_max_norm / grad_norm
             
@@ -631,8 +628,8 @@ def update_precond_lra(UVd, Luvd, v, h, lr=0.1, for_whitening=False):
     Lu, Lv, Ld = Luvd
 
     Qh = IpUVtmatvec(U, V, d * h)
-    if for_whitening: # we return the whitened gradient/momentum if used for updating the whitening preconditioner. 
-        Pg = d * IpUVtmatvec(V, U, Qh)
+    # we return the whitened gradient/momentum if used for updating the whitening preconditioner. 
+    Pg = d * IpUVtmatvec(V, U, Qh) if for_whitening else None
 
     IpVtU = V.t().mm(U)
     IpVtU.diagonal().add_(1) # avoid forming matrix I explicitly 
@@ -675,10 +672,7 @@ def update_precond_lra(UVd, Luvd, v, h, lr=0.1, for_whitening=False):
     V.div_(s)
     d.mul_(s)
 
-    if for_whitening:
-        return Pg # return the preconditioned gradient/momentum 
-    # else:
-    #     return None
+    return Pg
 
 
 def precond_grad_lra(UVd, g):
@@ -700,7 +694,7 @@ class LRAWhiten:
     """
     def __init__(self,  params_with_grad, rank_of_approximation:int=10, preconditioner_init_scale:float|None=None,
                         lr_params=0.001, lr_preconditioner=0.1, momentum=0.0,
-                        grad_clip_max_norm:float|None=None, preconditioner_update_probability=1.0, whiten_grad=True):
+                        grad_clip_max_norm=float("inf"), preconditioner_update_probability=1.0, whiten_grad=True):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner
@@ -772,7 +766,7 @@ class LRAWhiten:
             self._m, self._counter_m = None, 0 
             
         lr = self.lr_params
-        if self.grad_clip_max_norm is not None:
+        if self.grad_clip_max_norm < float("inf"):
             grad_norm = torch.linalg.vector_norm(pre_grad)
             if grad_norm > self.grad_clip_max_norm:
                 lr = lr * self.grad_clip_max_norm / grad_norm
@@ -793,7 +787,7 @@ class LRANewton:
     """
     def __init__(self,  params_with_grad, rank_of_approximation:int=10, preconditioner_init_scale:float|None=None,
                         lr_params=0.01, lr_preconditioner=0.1, momentum=0.0,
-                        grad_clip_max_norm:float|None=None, preconditioner_update_probability=1.0,
+                        grad_clip_max_norm=float("inf"), preconditioner_update_probability=1.0,
                         exact_hessian_vector_product=True):
         # mutable members
         self.lr_params = lr_params
@@ -884,7 +878,7 @@ class LRANewton:
             pre_grad = precond_grad_lra(self._UVd, grad)
             
         lr = self.lr_params
-        if self.grad_clip_max_norm is not None:
+        if self.grad_clip_max_norm < float("inf"):
             grad_norm = torch.linalg.vector_norm(pre_grad)
             if grad_norm > self.grad_clip_max_norm:
                 lr = lr * self.grad_clip_max_norm / grad_norm
@@ -958,7 +952,7 @@ class DenseNewton:
     """
     def __init__(self, params_with_grad, preconditioner_init_scale:float|None=None,
                  lr_params=0.01, lr_preconditioner=0.1, momentum=0.0, 
-                 grad_clip_max_norm:float|None=None, preconditioner_update_probability=1.0,
+                 grad_clip_max_norm=float("inf"), preconditioner_update_probability=1.0,
                  exact_hessian_vector_product=True, dQ="QE"):
         # mutable members
         self.lr_params = lr_params
@@ -1061,7 +1055,7 @@ class DenseNewton:
             pre_grad = self._precond_grad(self._Q, grad)
         
         lr = self.lr_params
-        if self.grad_clip_max_norm is not None:
+        if self.grad_clip_max_norm < float("inf"):
             grad_norm = torch.linalg.vector_norm(pre_grad)
             if grad_norm > self.grad_clip_max_norm:
                 lr = lr * self.grad_clip_max_norm / grad_norm
