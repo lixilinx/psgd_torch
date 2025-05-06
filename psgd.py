@@ -2,18 +2,18 @@
 The new PSGD-Kron Newton/Whitening preconditioners support four kinds of local coordinates for updating Q/P: 
 
     QUAD):  dP = mathcal{E} * P + P * mathcal{E} - mathcal{E} * P * mathcal{E}
-    The qudratic term is deliberately kept to ensure that P > 0.   
+    The qudratic term is deliberately kept to ensure that P > 0 (thus P is symmetric/Hermitian).   
     This is the only choice that can fit the preconditioner P directly. 
 
     QE):    dQ = Q * mathcal{E}
-    This leads to a simple and effective way for updating Q in Lie groups. 
+    This leads to a simple and effective way for updating Q in Lie groups (Q in the general linear group). 
 
     EQ):    dQ = mathcal{E} * Q
-    This choice recovers the old PSGD way for updating Q in Lie groups. 
+    This choice recovers the old PSGD way for updating Q in Lie groups (Q is triangular). 
     Its main drawback is that triangualr solvers are required for updating Q.  
 
     QEP):   dQ = Q * mathcal{E} * P
-    This last choice works very well if it does. 
+    This last choice works very well if it does. Q is in the general linear group.  
     But, one drawback is that Q might get stuck around ill-conditioned matrices. 
 
 The PSGD-LRA Newton/Whitening preconditioners still adopts local coordinate dQ = mathcal{E} * Q, 
@@ -309,15 +309,14 @@ def precond_grad_kron_whiten_quad(QL, exprs, G, lr=0.1, updateP=True):
                 term2 = total_numel/q.numel() # times I
                 ell = torch.max(torch.real(term1)) + term2 
                 L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
-                gain = 1 - lr/2/L[i] * (term1 - term2)
+                gain = 1 - lr/L[i] * (term1 - term2)
                 q.mul_(gain * gain) 
             else: # matrix Q
                 term2 = total_numel/q.shape[0] # times I
                 ell = norm_lower_bound_herm(term1) + term2
                 L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
-                lr = lr/2/L[i]
-                p = q - lr * (term1 @ q - term2 * q) 
-                p = p - lr * (p @ term1 - p * term2) 
+                p = q - lr/L[i] * (term1 @ q - term2 * q) 
+                p = p - lr/L[i] * (p @ term1 - p * term2) 
                 q.data = (p + p.H)/2 # p must be symmetric/hermitian  
                 
         if torch.rand([]) < 0.01: # balance factors of Q
@@ -479,12 +478,12 @@ def update_precond_kron_newton_quad(QL, exprs, V, Hvp, lr=0.1):
         if q.dim() < 2: # diagonal or scalar Q 
             ell = torch.max(torch.real(term1 + term2)) 
             L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
-            gain = 1 - lr/2/L[i] * (term1 - term2)
+            gain = 1 - lr/L[i] * (term1 - term2)
             q.mul_(gain * gain)
         else: # matrix Q
             ell = norm_lower_bound_herm(term1 + term2) 
             L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
-            err = lr/2/L[i] * (term1 - term2)
+            err = lr/L[i] * (term1 - term2)
             p = q - err @ q     # p = q - lr/L[i]/2 * (term1 - term2) @ q
             p = p - p @ err     # p = p - lr/L[i]/2 * p @ (term1 - term2)
             q.data = (p + p.H)/2 # p must be symmetric or hermitian  
@@ -936,9 +935,8 @@ def update_precond_dense_quad(Q, L, v, h, lr=0.1):
     a = Q @ h # Q actually is P; so just apply it once. 
     ell = torch.sum(a*a + v*v)
     L.data = torch.max(0.9*L + 0.1*ell, ell)
-    lr = lr/2/L
-    p = Q - lr * (a @ (a.T @ Q) - v @ (v.T @ Q)) 
-    p = p - lr * ((p @ a) @ a.T - (p @ v) @ v.T) 
+    p = Q - lr/L * (a @ (a.T @ Q) - v @ (v.T @ Q)) 
+    p = p - lr/L * ((p @ a) @ a.T - (p @ v) @ v.T) 
     Q.data = (p + p.T)/2 
 
 
