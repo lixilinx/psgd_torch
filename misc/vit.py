@@ -23,6 +23,18 @@ import psgd
 
 device = torch.device("cuda")
 
+
+def set_seed(seed):
+    # from chatgpt 
+    np.random.seed(seed)                   # NumPy RNG
+    torch.manual_seed(seed)                # PyTorch CPU RNG
+    torch.cuda.manual_seed(seed)           # PyTorch GPU RNG (if using CUDA)
+
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+set_seed(42)
+
 """
 Prepare the dataset
 """
@@ -373,10 +385,10 @@ ax1.tick_params(labelsize=6)
 ax1.legend(
     [
         "Adam",
-        "PSGD, EQ",
-        "PSGD, QE",
+        r"PSGD, $\mathcal{E}Q$",
+        r"PSGD, $Q\mathcal{E}$",
         "PSGD, QUAD",
-        "PSGD, QEP",
+        r"PSGD, $Q\mathcal{E}P$",
     ],
     fontsize=7,
 )
@@ -388,10 +400,10 @@ ax2.tick_params(labelsize=6)
 ax2.legend(
     [
         "Adam",
-        "PSGD, EQ",
-        "PSGD, QE",
+        r"PSGD, $\mathcal{E}Q$",
+        r"PSGD, $Q\mathcal{E}$",
         "PSGD, QUAD",
-        "PSGD, QEP",
+        r"PSGD, $Q\mathcal{E}P$",
     ],
     fontsize=7,
 )
