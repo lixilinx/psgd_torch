@@ -6,7 +6,7 @@ The new PSGD-Kron Newton/Whitening preconditioners support four kinds of local c
     This is the only choice that can fit the preconditioner P directly. 
 
     QE):    dQ = Q * mathcal{E}
-    This leads to a simple and effective way for updating Q in Lie groups (Q in the general linear group). 
+    This leads to a simple and effective way for updating Q in Lie groups (Q is in the general linear group). 
 
     EQ):    dQ = mathcal{E} * Q
     This choice recovers the old PSGD way for updating Q in Lie groups (Q is triangular). 
@@ -710,9 +710,9 @@ class LRAWhiten:
         assert 0 <= rank_of_approximation < num_params
         self._UVd = [] # saves U, V and d
         self._UVd.append(torch.randn(num_params, rank_of_approximation, dtype=dtype, device=device)) # U
-        self._UVd[0] /= torch.linalg.vector_norm(self._UVd[0])
+        self._UVd[0] *= 0.1**0.5 / torch.linalg.vector_norm(self._UVd[0])
         self._UVd.append(torch.randn(num_params, rank_of_approximation, dtype=dtype, device=device)) # V
-        self._UVd[1] /= torch.linalg.vector_norm(self._UVd[1])
+        self._UVd[1] *= 0.1**0.5 / torch.linalg.vector_norm(self._UVd[1])
         if preconditioner_init_scale is None:
             print("FYI: Will set the preconditioner initial scale on the fly. Recommend to set it manually.")
         else:
@@ -805,9 +805,9 @@ class LRANewton:
         assert 0 <= rank_of_approximation < num_params
         self._UVd = [] # saves U, V and d
         self._UVd.append(torch.randn(num_params, rank_of_approximation, dtype=dtype, device=device)) # U
-        self._UVd[0] /= torch.linalg.vector_norm(self._UVd[0])
+        self._UVd[0] *= 0.1**0.5 / torch.linalg.vector_norm(self._UVd[0])
         self._UVd.append(torch.randn(num_params, rank_of_approximation, dtype=dtype, device=device)) # V
-        self._UVd[1] /= torch.linalg.vector_norm(self._UVd[1])
+        self._UVd[1] *= 0.1**0.5 / torch.linalg.vector_norm(self._UVd[1])
         if preconditioner_init_scale is None:
             print("FYI: Will set the preconditioner initial scale on the fly. Recommend to set it manually.")
         else:
