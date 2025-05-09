@@ -21,12 +21,12 @@ torch.set_default_dtype(torch.float64)
 sys.path.append("..")
 from psgd import (init_kron, 
                   precond_grad_kron_whiten_eq, 
-                  precond_grad_kron_whiten_qep, 
+                  precond_grad_kron_whiten_quad, 
                   update_precond_kron_eq, 
-                  update_precond_kron_newton_qep, 
+                  update_precond_kron_newton_quad, 
                   precond_grad_kron)
 
-num_iterations = 10000
+num_iterations = 2000
 
 #%% 
 print("Test case: scalar preconditioner ")  
@@ -40,11 +40,11 @@ for i in range(num_iterations):
     precond_grad = precond_grad_kron_whiten_eq(QL, exprs, G, lr=(1-i/num_iterations)/2)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
-QL, exprs = init_kron(V, 1.0, 0.0, 0.0, "QEP")
+QL, exprs = init_kron(V, 1.0, 0.0, 0.0, "QUAD")
 for i in range(num_iterations):
     V = torch.randn([], dtype=torch.complex128)
     G = H * V 
-    precond_grad = precond_grad_kron_whiten_qep(QL, exprs, G, lr=(1-i/num_iterations)/2)
+    precond_grad = precond_grad_kron_whiten_quad(QL, exprs, G, lr=(1-i/num_iterations)/2)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
 QL, exprs = init_kron(V, 1.0, 0.0, 0.0, "EQ")
@@ -55,11 +55,11 @@ for i in range(num_iterations):
 precond_grad = precond_grad_kron(QL, exprs, G)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
-QL, exprs = init_kron(V, 1.0, 0.0, 0.0, "QEP")
+QL, exprs = init_kron(V, 1.0, 0.0, 0.0, "QUAD")
 for i in range(num_iterations):
     V = torch.randn([], dtype=torch.complex128)
     G = H * V 
-    update_precond_kron_newton_qep(QL, exprs, V, G, lr=(1-i/num_iterations)/2)
+    update_precond_kron_newton_quad(QL, exprs, V, G, lr=(1-i/num_iterations)/2)
 precond_grad = precond_grad_kron(QL, exprs, G)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
@@ -75,11 +75,11 @@ for i in range(num_iterations):
     precond_grad = precond_grad_kron_whiten_eq(QL, exprs, G, lr=(1-i/num_iterations)/2)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
-QL, exprs = init_kron(V, 1.0, 0.0, 0.0, "QEP")
+QL, exprs = init_kron(V, 1.0, 0.0, 0.0, "QUAD")
 for i in range(num_iterations):
     V = torch.randn(10, dtype=torch.complex128)
     G = H * V 
-    precond_grad = precond_grad_kron_whiten_qep(QL, exprs, G, lr=(1-i/num_iterations)/2)
+    precond_grad = precond_grad_kron_whiten_quad(QL, exprs, G, lr=(1-i/num_iterations)/2)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
 QL, exprs = init_kron(V, 1.0, 0.0, 0.0, "EQ")
@@ -90,11 +90,11 @@ for i in range(num_iterations):
 precond_grad = precond_grad_kron(QL, exprs, G)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
-QL, exprs = init_kron(V, 1.0, 0.0, 0.0, "QEP")
+QL, exprs = init_kron(V, 1.0, 0.0, 0.0, "QUAD")
 for i in range(num_iterations):
     V = torch.randn(10, dtype=torch.complex128)
     G = H * V 
-    update_precond_kron_newton_qep(QL, exprs, V, G, lr=(1-i/num_iterations)/2)
+    update_precond_kron_newton_quad(QL, exprs, V, G, lr=(1-i/num_iterations)/2)
 precond_grad = precond_grad_kron(QL, exprs, G)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
@@ -111,11 +111,11 @@ for i in range(num_iterations):
     precond_grad = precond_grad_kron_whiten_eq(QL, exprs, G, lr=(1-i/num_iterations)/2)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
-QL, exprs = init_kron(V, 1.0, float("inf"), float("inf"), "QEP")
+QL, exprs = init_kron(V, 1.0, float("inf"), float("inf"), "QUAD")
 for i in range(num_iterations):
     V = torch.randn(5, dtype=torch.complex128)
     G = H @ V 
-    precond_grad = precond_grad_kron_whiten_qep(QL, exprs, G, lr=(1-i/num_iterations)/2)
+    precond_grad = precond_grad_kron_whiten_quad(QL, exprs, G, lr=(1-i/num_iterations)/2)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
 QL, exprs = init_kron(V, 1.0, float("inf"), float("inf"), "EQ")
@@ -126,11 +126,11 @@ for i in range(num_iterations):
 precond_grad = precond_grad_kron(QL, exprs, G)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
-QL, exprs = init_kron(V, 1.0, float("inf"), float("inf"), "QEP")
+QL, exprs = init_kron(V, 1.0, float("inf"), float("inf"), "QUAD")
 for i in range(num_iterations):
     V = torch.randn(5, dtype=torch.complex128)
     G = H @ V 
-    update_precond_kron_newton_qep(QL, exprs, V, G, lr=(1-i/num_iterations)/2)
+    update_precond_kron_newton_quad(QL, exprs, V, G, lr=(1-i/num_iterations)/2)
 precond_grad = precond_grad_kron(QL, exprs, G)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
@@ -147,11 +147,11 @@ for i in range(num_iterations):
     precond_grad = precond_grad_kron_whiten_eq(QL, exprs, G, lr=(1-i/num_iterations)/2)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
-QL, exprs = init_kron(V, 1.0, 0, 0, "QEP")
+QL, exprs = init_kron(V, 1.0, 0, 0, "QUAD")
 for i in range(num_iterations):
     V = torch.randn(10, 3, dtype=torch.complex128)
     G = H1 * V * H2
-    precond_grad = precond_grad_kron_whiten_qep(QL, exprs, G, lr=(1-i/num_iterations)/2)
+    precond_grad = precond_grad_kron_whiten_quad(QL, exprs, G, lr=(1-i/num_iterations)/2)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
 QL, exprs = init_kron(V, 1.0, 0, 0, "EQ")
@@ -162,11 +162,11 @@ for i in range(num_iterations):
 precond_grad = precond_grad_kron(QL, exprs, G)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
-QL, exprs = init_kron(V, 1.0, 0, 0, "QEP")
+QL, exprs = init_kron(V, 1.0, 0, 0, "QUAD")
 for i in range(num_iterations):
     V = torch.randn(10, 3, dtype=torch.complex128)
     G = H1 * V * H2
-    update_precond_kron_newton_qep(QL, exprs, V, G, lr=(1-i/num_iterations)/2)
+    update_precond_kron_newton_quad(QL, exprs, V, G, lr=(1-i/num_iterations)/2)
 precond_grad = precond_grad_kron(QL, exprs, G)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")    
     
@@ -184,11 +184,11 @@ for i in range(num_iterations):
     precond_grad = precond_grad_kron_whiten_eq(QL, exprs, G, lr=(1-i/num_iterations)/2)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
-QL, exprs = init_kron(V, 1.0, 7.0, float("inf"), "QEP")
+QL, exprs = init_kron(V, 1.0, 7.0, float("inf"), "QUAD")
 for i in range(num_iterations):
     V = torch.randn(10, 5, dtype=torch.complex128)
     G = H1 * V @ H2
-    precond_grad = precond_grad_kron_whiten_qep(QL, exprs, G, lr=(1-i/num_iterations)/2)
+    precond_grad = precond_grad_kron_whiten_quad(QL, exprs, G, lr=(1-i/num_iterations)/2)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
 QL, exprs = init_kron(V, 1.0, 7.0, float("inf"), "EQ")
@@ -199,11 +199,11 @@ for i in range(num_iterations):
 precond_grad = precond_grad_kron(QL, exprs, G)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
-QL, exprs = init_kron(V, 1.0, 7.0, float("inf"), "QEP")
+QL, exprs = init_kron(V, 1.0, 7.0, float("inf"), "QUAD")
 for i in range(num_iterations):
     V = torch.randn(10, 5, dtype=torch.complex128)
     G = H1 * V @ H2
-    update_precond_kron_newton_qep(QL, exprs, V, G, lr=(1-i/num_iterations)/2)
+    update_precond_kron_newton_quad(QL, exprs, V, G, lr=(1-i/num_iterations)/2)
 precond_grad = precond_grad_kron(QL, exprs, G)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
@@ -221,11 +221,11 @@ for i in range(num_iterations):
     precond_grad = precond_grad_kron_whiten_eq(QL, exprs, G, lr=(1-i/num_iterations)/2)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
-QL, exprs = init_kron(V, 1.0, 7.0, float("inf"), "QEP")
+QL, exprs = init_kron(V, 1.0, 7.0, float("inf"), "QUAD")
 for i in range(num_iterations):
     V = torch.randn(5, 10, dtype=torch.complex128)
     G = H1 @ V * H2
-    precond_grad = precond_grad_kron_whiten_qep(QL, exprs, G, lr=(1-i/num_iterations)/2)
+    precond_grad = precond_grad_kron_whiten_quad(QL, exprs, G, lr=(1-i/num_iterations)/2)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
 QL, exprs = init_kron(V, 1.0, 7.0, float("inf"), "EQ")
@@ -236,11 +236,11 @@ for i in range(num_iterations):
 precond_grad = precond_grad_kron(QL, exprs, G)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
-QL, exprs = init_kron(V, 1.0, 7.0, float("inf"), "QEP")
+QL, exprs = init_kron(V, 1.0, 7.0, float("inf"), "QUAD")
 for i in range(num_iterations):
     V = torch.randn(5, 10, dtype=torch.complex128)
     G = H1 @ V * H2
-    update_precond_kron_newton_qep(QL, exprs, V, G, lr=(1-i/num_iterations)/2)
+    update_precond_kron_newton_quad(QL, exprs, V, G, lr=(1-i/num_iterations)/2)
 precond_grad = precond_grad_kron(QL, exprs, G)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
@@ -259,11 +259,11 @@ for i in range(num_iterations):
     precond_grad = precond_grad_kron_whiten_eq(QL, exprs, G, lr=(1-i/num_iterations)/2)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
-QL, exprs = init_kron(V, 1.0, float("inf"), float("inf"), "QEP")
+QL, exprs = init_kron(V, 1.0, float("inf"), float("inf"), "QUAD")
 for i in range(num_iterations):
     V = torch.randn(5, 7, dtype=torch.complex128)
     G = H1 @ V @ H2
-    precond_grad = precond_grad_kron_whiten_qep(QL, exprs, G, lr=(1-i/num_iterations)/2)
+    precond_grad = precond_grad_kron_whiten_quad(QL, exprs, G, lr=(1-i/num_iterations)/2)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
 QL, exprs = init_kron(V, 1.0, float("inf"), float("inf"), "EQ")
@@ -274,11 +274,11 @@ for i in range(num_iterations):
 precond_grad = precond_grad_kron(QL, exprs, G)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
-QL, exprs = init_kron(V, 1.0, float("inf"), float("inf"), "QEP")
+QL, exprs = init_kron(V, 1.0, float("inf"), float("inf"), "QUAD")
 for i in range(num_iterations):
     V = torch.randn(5, 7, dtype=torch.complex128)
     G = H1 @ V @ H2
-    update_precond_kron_newton_qep(QL, exprs, V, G, lr=(1-i/num_iterations)/2)
+    update_precond_kron_newton_quad(QL, exprs, V, G, lr=(1-i/num_iterations)/2)
 precond_grad = precond_grad_kron(QL, exprs, G)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
@@ -299,11 +299,11 @@ for i in range(num_iterations):
     precond_grad = precond_grad_kron_whiten_eq(QL, exprs, G, lr=(1-i/num_iterations)/2)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
-QL, exprs = init_kron(V, 1.0, float("inf"), float("inf"), "QEP")
+QL, exprs = init_kron(V, 1.0, float("inf"), float("inf"), "QUAD")
 for i in range(num_iterations):
     V = torch.randn(3,4,5, dtype=torch.complex128)
     G = opt_einsum.contract("li,mj,nk,ijk->lmn", H1,H2,H3, V)
-    precond_grad = precond_grad_kron_whiten_qep(QL, exprs, G, lr=(1-i/num_iterations)/2)
+    precond_grad = precond_grad_kron_whiten_quad(QL, exprs, G, lr=(1-i/num_iterations)/2)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
 QL, exprs = init_kron(V, 1.0, float("inf"), float("inf"), "EQ")
@@ -314,10 +314,10 @@ for i in range(num_iterations):
 precond_grad = precond_grad_kron(QL, exprs, G)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
 
-QL, exprs = init_kron(V, 1.0, float("inf"), float("inf"), "QEP")
+QL, exprs = init_kron(V, 1.0, float("inf"), float("inf"), "QUAD")
 for i in range(num_iterations):
     V = torch.randn(3,4,5, dtype=torch.complex128)
     G = opt_einsum.contract("li,mj,nk,ijk->lmn", H1,H2,H3, V)
-    update_precond_kron_newton_qep(QL, exprs, V, G, lr=(1-i/num_iterations)/2)
+    update_precond_kron_newton_quad(QL, exprs, V, G, lr=(1-i/num_iterations)/2)
 precond_grad = precond_grad_kron(QL, exprs, G)
 print(f"|Preconditioned gradient - inv(H)*gradient| should be small: \n {torch.abs(precond_grad - V)} \n")
