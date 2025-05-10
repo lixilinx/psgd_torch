@@ -50,7 +50,7 @@ def norm_lower_bound_herm(A):
 #############       Begin of PSGD Kronecker product preconditioners       #############         
 
 
-def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QE"):
+def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QUAD"):
     """
     For a scalar or tensor t, we initialize its states (preconditioner Q and Lipschitz constant L), 
     and reusable contraction expressions for updating Q and preconditioning gradient.
@@ -345,7 +345,7 @@ class KronWhiten:
             self._QLs_exprs = None # initialize on the fly 
             print("FYI: Will set the preconditioner initial scale on the fly. Recommend to set it manually.")
         else:
-            self._QLs_exprs = [init_kron(p, preconditioner_init_scale, preconditioner_max_size, preconditioner_max_skew, dQ) for p in self._params_with_grad]
+            self._QLs_exprs = [init_kron(p.squeeze(), preconditioner_init_scale, preconditioner_max_size, preconditioner_max_skew, dQ) for p in self._params_with_grad]
         self._ms, self._counter_m = None, 0 # momentum buffers and counter  
         self._whiten_grad = whiten_grad # set to False to whiten momentum.  
         if (not whiten_grad) and (self.momentum==0): # expect momentum > 0 when whiten_grad = False
@@ -370,7 +370,7 @@ class KronWhiten:
         with torch.enable_grad():
             closure_returns = closure()
             loss = closure_returns if isinstance(closure_returns, torch.Tensor) else closure_returns[0]
-            grads = torch.autograd.grad(loss, self._params_with_grad)
+            grads = [g.squeeze() for g in torch.autograd.grad(loss, self._params_with_grad)]
             
         if self._QLs_exprs is None:
             self._QLs_exprs = [init_kron(g, (torch.mean((torch.abs(g))**4))**(-1/8), 
@@ -404,7 +404,7 @@ class KronWhiten:
                 lr = lr * self.grad_clip_max_norm / grad_norm
             
         # Update the parameters
-        [param.subtract_(lr*g) for (param, g) in zip(self._params_with_grad, pre_grads)]
+        [param.subtract_(lr*g.view_as(param)) for (param, g) in zip(self._params_with_grad, pre_grads)]
         
         # return whatever closure returns
         return closure_returns
@@ -513,7 +513,7 @@ class KronNewton:
             self._QLs_exprs = None # initialize on the fly 
             print("FYI: Will set the preconditioner initial scale on the fly. Recommend to set it manually.")
         else:
-            self._QLs_exprs = [init_kron(p, preconditioner_init_scale, preconditioner_max_size, preconditioner_max_skew, dQ) for p in self._params_with_grad]
+            self._QLs_exprs = [init_kron(p.squeeze(), preconditioner_init_scale, preconditioner_max_size, preconditioner_max_skew, dQ) for p in self._params_with_grad]
         self._ms, self._counter_m = None, 0 # momentum buffers and counter 
         self._exact_hessian_vector_product = exact_hessian_vector_product
         if not exact_hessian_vector_product:
@@ -561,16 +561,17 @@ class KronNewton:
                 [p.sub_(v) for (p, v) in zip(self._params_with_grad, vs)] # remove the perturbation            
             
             if self._QLs_exprs is None: # initialize QLs on the fly if it is None 
-                self._QLs_exprs = [init_kron(h, (torch.mean((torch.abs(v))**2))**(1/4) * (torch.mean((torch.abs(h))**4))**(-1/8), 
+                self._QLs_exprs = [init_kron(h.squeeze(), (torch.mean((torch.abs(v))**2))**(1/4) * (torch.mean((torch.abs(h))**4))**(-1/8), 
                                              self._preconditioner_max_size, self._preconditioner_max_skew, self._dQ) for (v, h) in zip(vs, Hvs)]
             # update preconditioner
-            [self._update_precond(*QL_exprs, v, h, self.lr_preconditioner) for (QL_exprs, v, h) in zip(self._QLs_exprs, vs, Hvs)]
+            [self._update_precond(*QL_exprs, v.squeeze(), h.squeeze(), self.lr_preconditioner) for (QL_exprs, v, h) in zip(self._QLs_exprs, vs, Hvs)]
         else: # only evaluate the gradients
             with torch.enable_grad():
                 closure_returns = closure()
                 loss = closure_returns if isinstance(closure_returns, torch.Tensor) else closure_returns[0]
                 grads = torch.autograd.grad(loss, self._params_with_grad)
 
+        grads = [g.squeeze() for g in grads]
         if self.momentum > 0: # precondition the momentum 
             beta = min(self._counter_m/(1 + self._counter_m), self.momentum)
             self._counter_m += 1
@@ -590,7 +591,7 @@ class KronNewton:
                 lr = lr * self.grad_clip_max_norm / grad_norm
             
         # Update the parameters. 
-        [param.subtract_(lr*g) for (param, g) in zip(self._params_with_grad, pre_grads)]
+        [param.subtract_(lr*g.view_as(param)) for (param, g) in zip(self._params_with_grad, pre_grads)]
         
         # return whatever closure returns
         return closure_returns
