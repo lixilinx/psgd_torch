@@ -42,7 +42,7 @@ def norm_lower_bound_herm(A):
         aa = torch.real(A * A.conj())
         _, j = torch.max(torch.sum(aa, dim=1), 0)
         x = A @ A[j].conj()
-        return max_abs * torch.linalg.vector_norm(A.H @ (x / torch.linalg.vector_norm(x)))
+        return max_abs * torch.linalg.vector_norm(A @ (x / torch.linalg.vector_norm(x)))
     else: # must have A=0
         return max_abs 
     
@@ -50,7 +50,7 @@ def norm_lower_bound_herm(A):
 #############       Begin of PSGD Kronecker product preconditioners       #############         
 
 
-def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QUAD"):
+def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QE"):
     """
     For a scalar or tensor t, we initialize its states (preconditioner Q and Lipschitz constant L), 
     and reusable contraction expressions for updating Q and preconditioning gradient.
@@ -329,12 +329,12 @@ class KronWhiten:
     def __init__(self,  params_with_grad, 
                  preconditioner_max_size=float("inf"), preconditioner_max_skew=1.0, preconditioner_init_scale:float|None=None,
                  lr_params=0.001, lr_preconditioner=0.1, momentum=0.0,
-                 grad_clip_max_norm=float("inf"), preconditioner_update_probability=1.0, whiten_grad=True, dQ="QUAD"):
+                 grad_clip_max_amp=float("inf"), preconditioner_update_probability=1.0, whiten_grad=True, dQ="QE"):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner 
         self.momentum = momentum if (0<momentum<1) else 0.0
-        self.grad_clip_max_norm = grad_clip_max_norm
+        self.grad_clip_max_amp = grad_clip_max_amp # clip grad once its avg amplitude exceeds this max amplitude 
         self.preconditioner_update_probability = preconditioner_update_probability
         # protected members
         self._preconditioner_max_size = preconditioner_max_size
@@ -367,6 +367,14 @@ class KronWhiten:
         """
         Performs one step of PSGD with the Kronecker product gradient/momentum whitening preconditioner.
         """
+        def adjusted_lr(g):
+            lr = self.lr_params
+            if self.grad_clip_max_amp < float("inf"):
+                amp = torch.sqrt(torch.real(torch.mean(g * g.conj())))
+                if amp > self.grad_clip_max_amp:
+                    lr = lr * self.grad_clip_max_amp / amp
+            return lr 
+        
         with torch.enable_grad():
             closure_returns = closure()
             loss = closure_returns if isinstance(closure_returns, torch.Tensor) else closure_returns[0]
@@ -397,14 +405,8 @@ class KronWhiten:
         else: # already whitened gradients, just clear the momentum buffers and counter.  
             self._ms, self._counter_m = None, 0              
             
-        lr = self.lr_params
-        if self.grad_clip_max_norm < float("inf"):
-            grad_norm = torch.sqrt(torch.real(sum([torch.sum(g*g.conj()) for g in pre_grads])))
-            if grad_norm > self.grad_clip_max_norm:
-                lr = lr * self.grad_clip_max_norm / grad_norm
-            
         # Update the parameters
-        [param.subtract_(lr*g.view_as(param)) for (param, g) in zip(self._params_with_grad, pre_grads)]
+        [param.subtract_(adjusted_lr(g) * g.view_as(param)) for (param, g) in zip(self._params_with_grad, pre_grads)]
         
         # return whatever closure returns
         return closure_returns
@@ -496,7 +498,7 @@ class KronNewton:
     def __init__(self,  params_with_grad, preconditioner_max_size=float("inf"), preconditioner_max_skew=1.0, preconditioner_init_scale:float|None=None,
                         lr_params=0.01, lr_preconditioner=0.1, momentum=0.0,
                         grad_clip_max_norm=float("inf"), preconditioner_update_probability=1.0,
-                        exact_hessian_vector_product=True, dQ="QUAD"):
+                        exact_hessian_vector_product=True, dQ="QE"):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner        
@@ -687,12 +689,12 @@ class LRAWhiten:
     """
     def __init__(self,  params_with_grad, rank_of_approximation:int=10, preconditioner_init_scale:float|None=None,
                         lr_params=0.001, lr_preconditioner=0.1, momentum=0.0,
-                        grad_clip_max_norm=float("inf"), preconditioner_update_probability=1.0, whiten_grad=True):
+                        grad_clip_max_amp=float("inf"), preconditioner_update_probability=1.0, whiten_grad=True):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner
         self.momentum = momentum if (0<momentum<1) else 0.0
-        self.grad_clip_max_norm = grad_clip_max_norm
+        self.grad_clip_max_amp = grad_clip_max_amp
         self.preconditioner_update_probability = preconditioner_update_probability
         # protected members
         params_with_grad = [params_with_grad,] if isinstance(params_with_grad, torch.Tensor) else params_with_grad
@@ -759,10 +761,10 @@ class LRAWhiten:
             self._m, self._counter_m = None, 0 
             
         lr = self.lr_params
-        if self.grad_clip_max_norm < float("inf"):
-            grad_norm = torch.linalg.vector_norm(pre_grad)
-            if grad_norm > self.grad_clip_max_norm:
-                lr = lr * self.grad_clip_max_norm / grad_norm
+        if self.grad_clip_max_amp < float("inf"):
+            amp = torch.sqrt(torch.mean(pre_grad * pre_grad))
+            if amp > self.grad_clip_max_amp:
+                lr = lr * self.grad_clip_max_amp/amp 
             
         # update the parameters 
         [param.subtract_(lr * pre_grad[j - i:j].view_as(param)) 
@@ -944,7 +946,7 @@ class DenseNewton:
     def __init__(self, params_with_grad, preconditioner_init_scale:float|None=None,
                  lr_params=0.01, lr_preconditioner=0.1, momentum=0.0, 
                  grad_clip_max_norm=float("inf"), preconditioner_update_probability=1.0,
-                 exact_hessian_vector_product=True, dQ="QUAD"):
+                 exact_hessian_vector_product=True, dQ="QE"):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner
