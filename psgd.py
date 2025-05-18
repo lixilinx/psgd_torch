@@ -1,12 +1,11 @@
 """
 The new PSGD-Kron Newton/Whitening preconditioners support four kinds of local coordinates for updating Q: 
 
-    QUAD):  dQ = mathcal{E} * Q + Q * mathcal{E} - mathcal{E} * Q * mathcal{E}
-    The qudratic term is deliberately kept to ensure that Q > 0 (thus Q is symmetric/Hermitian).   
+    QUAD): It's a specific form for updating Q to ensure that Q > 0 (thus Q is symmetric/Hermitian).   
     This is one of the recommended choices for fitting Q. 
 
-    QE):    dQ = Q * mathcal{E}
-    This leads to another simple way for updating Q in Lie groups (Q is in the general linear group).
+    QEQ):    dQ = Q * mathcal{E} * Q
+    This leads to another simple way for updating Q (Q is in the general linear group).
     It's another recommended choice for fitting Q.  
 
     EQ):    dQ = mathcal{E} * Q
@@ -17,11 +16,11 @@ The new PSGD-Kron Newton/Whitening preconditioners support four kinds of local c
     This last choice works very well if it does. Q is in the general linear group.  
     But, one drawback is that Q might get stuck around ill-conditioned matrices (don't recommend this choice). 
 
-The PSGD-LRA Newton/Whitening preconditioners still adopts local coordinate dQ = mathcal{E} * Q, 
+The PSGD-LRA Newton/Whitening preconditioners still adopt local coordinate dQ = mathcal{E} * Q, 
 and needs a small linear solver to update the preconditioner.
 
 I also keep the PSGD dense matrix Newton-type preconditioner here to illustrate the math. 
-It supports all the four sets of local coordinates for updating Q, 
+It supports all the four methods for updating Q, 
 and can be a good alternative to the BFGS like quasi-Newton optimizers as no line search is required. 
 
 Xi-Lin Li, lixilinx@gmail.com; in April and May, 2025. 
@@ -50,7 +49,7 @@ def norm_lower_bound_herm(A):
 #############       Begin of PSGD Kronecker product preconditioners       #############         
 
 
-def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QE"):
+def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QEQ"):
     """
     For a scalar or tensor t, we initialize its states (preconditioner Q and Lipschitz constant L), 
     and reusable contraction expressions for updating Q and preconditioning gradient.
@@ -147,7 +146,7 @@ def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QE"):
     elif dQ == "EQ": 
         return [[Q, L], (exprP, exprGs, exprA)]
     else:
-        assert (dQ == "QE") or (dQ == "QUAD") 
+        assert (dQ == "QEQ") or (dQ == "QUAD") 
         return [[Q, L], (exprP, exprGs)]
 
 
@@ -163,7 +162,7 @@ def balance_kron_precond(Q):
             q.mul_(gmean/norms[i]) 
 
 
-def update_precond_kron_eq(QL, exprs, V, Hvp, lr=0.1, for_whitening=False):
+def update_precond_kron_eq(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, for_whitening=False):
     """
     Update Kron preconditioner Q as dQ = E*Q and Lipschitz constant L with (v, hvp) pair (V, Hvp). 
     If used for gradient/momentum whitening, we also return the whitend gradient/momentum. 
@@ -196,11 +195,11 @@ def update_precond_kron_eq(QL, exprs, V, Hvp, lr=0.1, for_whitening=False):
                    
         if q.dim() < 2: # q is a diagonal matrix or scalar preconditioner
             ell = torch.max(torch.real(term1 + term2))
-            L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
+            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
             q.sub_(lr/L[i] * (term1 - term2) * q)      
         else: # q is a matrix preconditioner 
             ell = norm_lower_bound_herm(term1 + term2)
-            L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
+            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
             q.sub_(lr/L[i] * torch.triu(term1 - term2) @ q)
 
     if torch.rand([]) < 0.01: # balance factors of Q
@@ -217,18 +216,18 @@ def precond_grad_kron(QL, exprs, G):
     return exprP(*[q.conj() for q in Q], *Q, G) 
 
 
-def precond_grad_kron_whiten_eq(QL, exprs, G, lr=0.1, updateP=True):
+def precond_grad_kron_whiten_eq(QL, exprs, G, lr=0.1, betaL=0.9, updateP=True):
     """
     Precondition gradient G with Kron gradient/momentum whitening preconditioner Q.
     We just optionally update the preconditioner Q as dQ = E*Q to save computations.
     """
     if updateP:
-        return update_precond_kron_eq(QL, exprs, torch.randn_like(G), G, lr=lr, for_whitening=True)
+        return update_precond_kron_eq(QL, exprs, torch.randn_like(G), G, lr=lr, betaL=betaL, for_whitening=True)
     else:
         return precond_grad_kron(QL, exprs, G)
     
 
-def precond_grad_kron_whiten_qep(QL, exprs, G, lr=0.1, updateP=True):
+def precond_grad_kron_whiten_qep(QL, exprs, G, lr=0.1, betaL=0.9, updateP=True):
     """
     Precondition gradient G with Kron gradient/momentum whitening preconditioner Q. 
     We just optionally update the preconditioner Q as dQ = Q*E*P to save computations. 
@@ -248,21 +247,21 @@ def precond_grad_kron_whiten_qep(QL, exprs, G, lr=0.1, updateP=True):
             if q.dim() < 2: # diagonal or scalar Q 
                 term2 = total_numel/q.numel() * q * q.conj()
                 ell = torch.max(torch.real(term1 + term2)) 
-                L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
+                L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
                 q.sub_(lr/L[i] * (term1 - term2) * q)
             else: # matrix Q
                 term2 = total_numel/q.shape[0] * q @ q.H
                 ell = norm_lower_bound_herm(term1 + term2)
-                L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
+                L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
                 q.sub_(lr/L[i] * (term1 - term2) @ q)
                     
     return Pg
 
 
-def precond_grad_kron_whiten_qe(QL, exprs, G, lr=0.1, updateP=True):
+def precond_grad_kron_whiten_qeq(QL, exprs, G, lr=0.1, betaL=0.9, updateP=True):
     """
     Precondition gradient G with Kron gradient/momentum whitening preconditioner Q. 
-    We just optionally update the preconditioner Q as dQ = Q*E to save computations. 
+    We just optionally update the preconditioner Q as dQ = Q*E*Q to save computations. 
     """   
     Q, L = QL
     exprP, exprGs = exprs
@@ -275,12 +274,12 @@ def precond_grad_kron_whiten_qe(QL, exprs, G, lr=0.1, updateP=True):
             if q.dim() < 2: # diagonal or scalar Q 
                 term2 = total_numel/q.numel() # times I
                 ell = torch.max(torch.real(term1)) + term2 
-                L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
+                L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
                 q.sub_(lr/L[i] * q * (term1 - term2))
             else: # matrix Q
                 term2 = total_numel/q.shape[0] # times I
                 ell = norm_lower_bound_herm(term1) + term2
-                L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
+                L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
                 q.sub_(lr/L[i] * (q @ term1 - q * term2))
                 
         if torch.rand([]) < 0.01: # balance factors of Q
@@ -289,7 +288,7 @@ def precond_grad_kron_whiten_qe(QL, exprs, G, lr=0.1, updateP=True):
     return Pg
 
 
-def precond_grad_kron_whiten_quad(QL, exprs, G, lr=0.1, updateP=True):
+def precond_grad_kron_whiten_quad(QL, exprs, G, lr=0.1, betaL=0.9, updateP=True):
     """
     Precondition gradient G with Kron gradient/momentum whitening preconditioner Q. 
     We just optionally update Q with a quadratic form here to save computations. 
@@ -305,13 +304,13 @@ def precond_grad_kron_whiten_quad(QL, exprs, G, lr=0.1, updateP=True):
             if q.dim() < 2: # diagonal or scalar Q 
                 term2 = total_numel/q.numel() # times I
                 ell = torch.max(torch.real(term1)) + term2 
-                L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
+                L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
                 gain = 1 - lr/2/L[i] * (term1 - term2)
                 q.mul_(gain * gain) 
             else: # matrix Q
                 term2 = total_numel/q.shape[0] # times I
                 ell = norm_lower_bound_herm(term1) + term2
-                L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
+                L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
                 p = q - lr/2/L[i] * (term1 @ q - term2 * q) 
                 p = p - lr/2/L[i] * (p @ term1 - p * term2) 
                 q.data = (p + p.H)/2 # p must be symmetric/hermitian  
@@ -328,11 +327,12 @@ class KronWhiten:
     """
     def __init__(self,  params_with_grad, 
                  preconditioner_max_size=float("inf"), preconditioner_max_skew=1.0, preconditioner_init_scale:float|None=None,
-                 lr_params=0.001, lr_preconditioner=0.1, momentum=0.0,
-                 grad_clip_max_amp=float("inf"), preconditioner_update_probability=1.0, whiten_grad=True, dQ="QE"):
+                 lr_params=0.001, lr_preconditioner=0.1, betaL=0.9, momentum=0.0,
+                 grad_clip_max_amp=float("inf"), preconditioner_update_probability=1.0, whiten_grad=True, dQ="QEQ"):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner 
+        self.betaL = betaL # beta for Lipschitz constant estimation; set to a large value for sparse gradients 
         self.momentum = momentum if (0<momentum<1) else 0.0
         self.grad_clip_max_amp = grad_clip_max_amp # clip grad once its avg amplitude exceeds this max amplitude 
         self.preconditioner_update_probability = preconditioner_update_probability
@@ -355,8 +355,8 @@ class KronWhiten:
             self._precond_grad = precond_grad_kron_whiten_qep
         elif dQ == "EQ":
             self._precond_grad = precond_grad_kron_whiten_eq
-        elif dQ == "QE":
-            self._precond_grad = precond_grad_kron_whiten_qe
+        elif dQ == "QEQ":
+            self._precond_grad = precond_grad_kron_whiten_qeq
         else:
             assert dQ == "QUAD"
             self._precond_grad = precond_grad_kron_whiten_quad
@@ -386,7 +386,7 @@ class KronWhiten:
             
         conds = torch.rand(len(grads)) < self.preconditioner_update_probability
         if self.momentum==0 or self._whiten_grad: # anyway, needs to the whiten gradient in either case
-            pre_grads = [self._precond_grad(*QL_exprs, g, self.lr_preconditioner, updateP) 
+            pre_grads = [self._precond_grad(*QL_exprs, g, self.lr_preconditioner, self.betaL, updateP) 
                          for (QL_exprs, g, updateP) in zip(self._QLs_exprs, grads, conds)]
         
         if self.momentum > 0:
@@ -400,7 +400,7 @@ class KronWhiten:
                 pre_grads = self._ms
             else: # whiten the momentum 
                 [m.mul_(beta).add_(g, alpha=1 - beta) for (m, g) in zip(self._ms, grads)]
-                pre_grads = [self._precond_grad(*QL_exprs, m, self.lr_preconditioner, updateP) 
+                pre_grads = [self._precond_grad(*QL_exprs, m, self.lr_preconditioner, self.betaL, updateP) 
                              for (QL_exprs, m, updateP) in zip(self._QLs_exprs, self._ms, conds)]
         else: # already whitened gradients, just clear the momentum buffers and counter.  
             self._ms, self._counter_m = None, 0              
@@ -412,7 +412,7 @@ class KronWhiten:
         return closure_returns
     
     
-def update_precond_kron_newton_qep(QL, exprs, V, Hvp, lr=0.1):
+def update_precond_kron_newton_qep(QL, exprs, V, Hvp, lr=0.1, betaL=0.9):
     """
     Update the Kron Newton-type preconditioner Q as dQ = Q*E*P with a pair of vector and hvp, (V, Hvp). 
     """   
@@ -430,17 +430,17 @@ def update_precond_kron_newton_qep(QL, exprs, V, Hvp, lr=0.1):
         term2 = exprGs[i](Qv, Qv.conj())
         if q.dim() < 2: # diagonal or scalar Q 
             ell = torch.max(torch.real(term1 + term2)) 
-            L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
+            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
             q.sub_(lr/L[i] * (term1 - term2) * q)
         else: # matrix Q
             ell = norm_lower_bound_herm(term1 + term2) 
-            L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
+            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
             q.sub_(lr/L[i] * (term1 - term2) @ q)
 
 
-def update_precond_kron_newton_qe(QL, exprs, V, Hvp, lr=0.1):
+def update_precond_kron_newton_qeq(QL, exprs, V, Hvp, lr=0.1, betaL=0.9):
     """
-    Update the Kron Newton-type preconditioner Q as dQ = Q*E with a pair of vector and hvp, (V, Hvp). 
+    Update the Kron Newton-type preconditioner Q as dQ = Q*E*Q with a pair of vector and hvp, (V, Hvp). 
     """   
     Q, L = QL
     exprP, exprGs = exprs
@@ -451,18 +451,18 @@ def update_precond_kron_newton_qe(QL, exprs, V, Hvp, lr=0.1):
         term2 = exprGs[i](V, V.conj())
         if q.dim() < 2: # diagonal or scalar Q 
             ell = torch.max(torch.real(term1 + term2)) 
-            L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
+            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
             q.sub_(lr/L[i] * q * (term1 - term2))
         else: # matrix Q
             ell = norm_lower_bound_herm(term1 + term2) 
-            L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
+            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
             q.sub_(lr/L[i] * q @ (term1 - term2))
     
     if torch.rand([]) < 0.01: # balance factors of Q
         balance_kron_precond(Q)
 
 
-def update_precond_kron_newton_quad(QL, exprs, V, Hvp, lr=0.1):
+def update_precond_kron_newton_quad(QL, exprs, V, Hvp, lr=0.1, betaL=0.9):
     """
     Update the Kron Newton-type preconditioner Q with a quadratic form for dQ and pair of vector and hvp, (V, Hvp). 
     """   
@@ -475,12 +475,12 @@ def update_precond_kron_newton_quad(QL, exprs, V, Hvp, lr=0.1):
         term2 = exprGs[i](V, V.conj())
         if q.dim() < 2: # diagonal or scalar Q 
             ell = torch.max(torch.real(term1 + term2)) 
-            L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
+            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
             gain = 1 - lr/2/L[i] * (term1 - term2)
             q.mul_(gain * gain)
         else: # matrix Q
             ell = norm_lower_bound_herm(term1 + term2) 
-            L[i].data = torch.max(0.9*L[i] + 0.1*ell, ell)
+            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
             err = lr/2/L[i] * (term1 - term2)
             p = q - err @ q     # p = q - lr/L[i]/2 * (term1 - term2) @ q
             p = p - p @ err     # p = p - lr/L[i]/2 * p @ (term1 - term2)
@@ -496,12 +496,13 @@ class KronNewton:
     Be extra cautious when using the finite difference method for Hvp approximation (the closure must behave like a pure function). 
     """
     def __init__(self,  params_with_grad, preconditioner_max_size=float("inf"), preconditioner_max_skew=1.0, preconditioner_init_scale:float|None=None,
-                        lr_params=0.01, lr_preconditioner=0.1, momentum=0.0,
+                        lr_params=0.01, lr_preconditioner=0.1, betaL=0.9, momentum=0.0,
                         grad_clip_max_norm=float("inf"), preconditioner_update_probability=1.0,
-                        exact_hessian_vector_product=True, dQ="QE"):
+                        exact_hessian_vector_product=True, dQ="QEQ"):
         # mutable members
         self.lr_params = lr_params
-        self.lr_preconditioner = lr_preconditioner        
+        self.lr_preconditioner = lr_preconditioner     
+        self.betaL = betaL # beta for Lipschitz constant estimation; set to a large value for sparse Hvp   
         self.momentum = momentum if (0<momentum<1) else 0.0
         self.grad_clip_max_norm = grad_clip_max_norm
         self.preconditioner_update_probability = preconditioner_update_probability
@@ -529,8 +530,8 @@ class KronNewton:
         elif dQ == "EQ":
             self._update_precond = update_precond_kron_eq
         else:
-            assert dQ == "QE"
-            self._update_precond = update_precond_kron_newton_qe            
+            assert dQ == "QEQ"
+            self._update_precond = update_precond_kron_newton_qeq            
 
 
     @torch.no_grad()
@@ -566,7 +567,7 @@ class KronNewton:
                 self._QLs_exprs = [init_kron(h.squeeze(), (torch.mean((torch.abs(v))**2))**(1/4) * (torch.mean((torch.abs(h))**4))**(-1/8), 
                                              self._preconditioner_max_size, self._preconditioner_max_skew, self._dQ) for (v, h) in zip(vs, Hvs)]
             # update preconditioner
-            [self._update_precond(*QL_exprs, v.squeeze(), h.squeeze(), self.lr_preconditioner) for (QL_exprs, v, h) in zip(self._QLs_exprs, vs, Hvs)]
+            [self._update_precond(*QL_exprs, v.squeeze(), h.squeeze(), self.lr_preconditioner, self.betaL) for (QL_exprs, v, h) in zip(self._QLs_exprs, vs, Hvs)]
         else: # only evaluate the gradients
             with torch.enable_grad():
                 closure_returns = closure()
@@ -612,7 +613,7 @@ def IpUVtmatvec(U, V, x):
     return x + U.mm(V.t().mm(x))
 
 
-def update_precond_lra(UVd, Luvd, v, h, lr=0.1, for_whitening=False):
+def update_precond_lra(UVd, Luvd, v, h, lr=0.1, betaL=0.9, for_whitening=False):
     """
     Update LRA preconditioner Q = (I + U*V')*diag(d) with (vector, Hessian-vector product) = (v, h).
     State variables (U, V, d) and their Lipschitz constant estimates (Lu, Lv, Ld) are updated inplace. 
@@ -648,7 +649,7 @@ def update_precond_lra(UVd, Luvd, v, h, lr=0.1, for_whitening=False):
         btVVt = btV.mm(V.t())
         ell = (torch.linalg.vector_norm(a)*torch.linalg.vector_norm(atVVt) + 
                torch.linalg.vector_norm(b)*torch.linalg.vector_norm(btVVt))
-        Lu.data = torch.max(0.9*Lu + 0.1*ell, ell)
+        Lu.data = torch.max(betaL*Lu + (1 - betaL)*ell, ell)
         U.sub_(lr/Lu * ( a.mm(atV.mm(IpVtU)) - b.mm(btV.mm(IpVtU)) ))
     else: # only udate V
         atU = a.t().mm(U)
@@ -657,11 +658,11 @@ def update_precond_lra(UVd, Luvd, v, h, lr=0.1, for_whitening=False):
         UUtb = U.mm(btU.t())
         ell = (torch.linalg.vector_norm(a)*torch.linalg.vector_norm(UUta) + 
                torch.linalg.vector_norm(b)*torch.linalg.vector_norm(UUtb))
-        Lv.data = torch.max(0.9*Lv + 0.1*ell, ell)
+        Lv.data = torch.max(betaL*Lv + (1 - betaL)*ell, ell)
         V.sub_(lr/Lv * ( (a + V.mm(atU.t())).mm(atU) - (b + V.mm(btU.t())).mm(btU) ))
     # always update d after U and V as its update impacts U and V too
     ell = torch.max(aa + bb)
-    Ld.data = torch.max(0.9*Ld + 0.1*ell, ell)
+    Ld.data = torch.max(betaL*Ld + (1 - betaL)*ell, ell)
     s = 1 - lr/Ld * (aa - bb)
     U.mul_(s)
     V.div_(s)
@@ -688,11 +689,12 @@ class LRAWhiten:
     One can set rank r to zero to get the diagonal preconditioner. 
     """
     def __init__(self,  params_with_grad, rank_of_approximation:int=10, preconditioner_init_scale:float|None=None,
-                        lr_params=0.001, lr_preconditioner=0.1, momentum=0.0,
+                        lr_params=0.001, lr_preconditioner=0.1, betaL=0.9, momentum=0.0,
                         grad_clip_max_amp=float("inf"), preconditioner_update_probability=1.0, whiten_grad=True):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner
+        self.betaL = betaL  # set to a large betaL for sparse gradients 
         self.momentum = momentum if (0<momentum<1) else 0.0
         self.grad_clip_max_amp = grad_clip_max_amp
         self.preconditioner_update_probability = preconditioner_update_probability
@@ -738,7 +740,7 @@ class LRAWhiten:
 
         if self.momentum==0 or self._whiten_grad: # anyway, needs to whiten gradient in either case 
             if torch.rand([]) < self.preconditioner_update_probability:
-                pre_grad = update_precond_lra(self._UVd, self._Luvd, torch.randn_like(grad), grad, self.lr_preconditioner, for_whitening=True)
+                pre_grad = update_precond_lra(self._UVd, self._Luvd, torch.randn_like(grad), grad, self.lr_preconditioner, self.betaL, for_whitening=True)
             else:
                 pre_grad = precond_grad_lra(self._UVd, grad)
   
@@ -754,7 +756,7 @@ class LRAWhiten:
             else: # whiten momentum 
                 self._m.mul_(beta).add_(grad, alpha=1 - beta) 
                 if torch.rand([]) < self.preconditioner_update_probability:
-                    pre_grad = update_precond_lra(self._UVd, self._Luvd, torch.randn_like(self._m), self._m, self.lr_preconditioner, for_whitening=True)
+                    pre_grad = update_precond_lra(self._UVd, self._Luvd, torch.randn_like(self._m), self._m, self.lr_preconditioner, self.betaL, for_whitening=True)
                 else:
                     pre_grad = precond_grad_lra(self._UVd, self._m)
         else: # already whitened the gradient; just clear the buffer and counter when momentum is set to zero 
@@ -781,12 +783,13 @@ class LRANewton:
     Be extra cautious when using the finite difference method for Hvp approximation (the closure must behave like a pure function).
     """
     def __init__(self,  params_with_grad, rank_of_approximation:int=10, preconditioner_init_scale:float|None=None,
-                        lr_params=0.01, lr_preconditioner=0.1, momentum=0.0,
+                        lr_params=0.01, lr_preconditioner=0.1, betaL=0.9, momentum=0.0,
                         grad_clip_max_norm=float("inf"), preconditioner_update_probability=1.0,
                         exact_hessian_vector_product=True):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner
+        self.betaL = betaL # set to a large betaL for sparse Hvp 
         self.momentum = momentum if (0<momentum<1) else 0.0
         self.grad_clip_max_norm = grad_clip_max_norm
         self.preconditioner_update_probability = preconditioner_update_probability
@@ -850,7 +853,7 @@ class LRANewton:
                 self._UVd.append((torch.mean(v*v))**(1/4) * (torch.mean(h**4))**(-1/8) * torch.ones_like(v))
             
             # update preconditioner
-            update_precond_lra(self._UVd, self._Luvd, v, h, self.lr_preconditioner)
+            update_precond_lra(self._UVd, self._Luvd, v, h, self.lr_preconditioner, self.betaL)
         else: # only evaluates the gradients
             with torch.enable_grad():
                 closure_returns = closure()
@@ -892,45 +895,45 @@ class LRANewton:
 #############       Begin of PSGD dense matrix Newton-type preconditioner       #############
 
 
-def update_precond_dense_eq(Q, L, v, h, lr=0.1):
+def update_precond_dense_eq(Q, L, v, h, lr=0.1, betaL=0.9):
     """
     Update dense matrix Newton-type preconditioner Q with local coordinate dQ = mathcal{E} * Q.
     """
     a = Q.mm(h)
     b = torch.linalg.solve_triangular(Q.t(), v, upper=False)
     ell = torch.sum(a*a + b*b)
-    L.data = torch.max(0.9*L + 0.1*ell, ell)
+    L.data = torch.max(betaL*L + (1 - betaL)*ell, ell)
     Q.sub_(lr/L * torch.triu(a.mm(a.t()) - b.mm(b.t())) @ Q)
 
 
-def update_precond_dense_qep(Q, L, v, h, lr=0.1):
+def update_precond_dense_qep(Q, L, v, h, lr=0.1, betaL=0.9):
     """
     Update dense matrix Newton-type preconditioner Q with local coordinate dQ = Q * mathcal{E} * P.
     """
     a = Q @ (Q.T @ (Q @ h))
     b = Q @ v
     ell = torch.sum(a*a + b*b)
-    L.data = torch.max(0.9*L + 0.1*ell, ell)
+    L.data = torch.max(betaL*L + (1 - betaL)*ell, ell)
     Q.sub_(lr/L * (a @ (a.T @ Q) - b @ (b.T @ Q)))
 
 
-def update_precond_dense_qe(Q, L, v, h, lr=0.1):
+def update_precond_dense_qeq(Q, L, v, h, lr=0.1, betaL=0.9):
     """
-    Update dense matrix Newton-type preconditioner Q with local coordinate dQ = Q * mathcal{E}.
+    Update dense matrix Newton-type preconditioner Q with local coordinate dQ = Q * mathcal{E} * Q.
     """
     a = Q.T @ (Q @ h)
     ell = torch.sum(a*a + v*v)
-    L.data = torch.max(0.9*L + 0.1*ell, ell)
+    L.data = torch.max(betaL*L + (1 - betaL)*ell, ell)
     Q.sub_(lr/L * ((Q @ a) @ a.T - (Q @ v) @ v.T))
 
 
-def update_precond_dense_quad(Q, L, v, h, lr=0.1):
+def update_precond_dense_quad(Q, L, v, h, lr=0.1, betaL=0.9):
     """
     Update dense matrix Newton-type preconditioner Q with a quadratic form for dQ.
     """
     a = Q @ (Q @ h) # Q is symmetric here 
     ell = torch.sum(a*a + v*v)
-    L.data = torch.max(0.9*L + 0.1*ell, ell)
+    L.data = torch.max(betaL*L + (1 - betaL)*ell, ell)
     p = Q - lr/2/L * (a @ (a.T @ Q) - v @ (v.T @ Q)) 
     p = p - lr/2/L * ((p @ a) @ a.T - (p @ v) @ v.T) 
     Q.data = (p + p.T)/2 
@@ -944,12 +947,13 @@ class DenseNewton:
     It's also a good alternative to the BFGS like quasi-Newton methods as no line search is required. 
     """
     def __init__(self, params_with_grad, preconditioner_init_scale:float|None=None,
-                 lr_params=0.01, lr_preconditioner=0.1, momentum=0.0, 
+                 lr_params=0.01, lr_preconditioner=0.1, betaL=0.9, momentum=0.0, 
                  grad_clip_max_norm=float("inf"), preconditioner_update_probability=1.0,
-                 exact_hessian_vector_product=True, dQ="QE"):
+                 exact_hessian_vector_product=True, dQ="QEQ"):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner
+        self.betaL = betaL  # set to a large betaL for sparse Hvp  
         self.momentum = momentum if (0<momentum<1) else 0.0
         self.grad_clip_max_norm = grad_clip_max_norm
         self.preconditioner_update_probability = preconditioner_update_probability
@@ -981,8 +985,8 @@ class DenseNewton:
             elif dQ == "EQ":
                 self._update_precond = update_precond_dense_eq           
             else: 
-                assert dQ == "QE"
-                self._update_precond = update_precond_dense_qe
+                assert dQ == "QEQ"
+                self._update_precond = update_precond_dense_qeq
                         
 
     @torch.no_grad()
@@ -1021,7 +1025,7 @@ class DenseNewton:
                 self._Q = torch.eye(len(v), dtype=v.dtype, device=v.device) * scale
 
             # update preconditioner 
-            self._update_precond(self._Q, self._L, v, h, self.lr_preconditioner)
+            self._update_precond(self._Q, self._L, v, h, self.lr_preconditioner, self.betaL)
         else: # only evaluates the gradients
             with torch.enable_grad():
                 closure_returns = closure()
