@@ -10,11 +10,11 @@ The new PSGD-Kron Newton/Whitening preconditioners support four kinds of local c
 
     EQ):    dQ = mathcal{E} * Q
     This choice recovers the old PSGD way for updating Q in Lie groups (Q is triangular). 
-    Its main drawback is that triangualr solvers are required for updating Q (don't recommend this choice).  
+    Its main drawback is that triangualr solvers are required for updating Q.  
 
     QEP):   dQ = Q * mathcal{E} * P
     This last choice works very well if it does. Q is in the general linear group.  
-    But, one drawback is that Q might get stuck around ill-conditioned matrices (don't recommend this choice). 
+    But, one drawback is that Q might get stuck around ill-conditioned matrices (not strongly convex). 
 
 The PSGD-LRA Newton/Whitening preconditioners still adopt local coordinate dQ = mathcal{E} * Q, 
 and needs a small linear solver to update the preconditioner.
@@ -39,7 +39,7 @@ def norm_lower_bound_herm(A):
     if max_abs > 0:
         A = A/max_abs
         aa = torch.real(A * A.conj())
-        _, j = torch.max(torch.sum(aa, dim=1), 0)
+        j = torch.argmax(torch.sum(aa, dim=1))
         x = A @ A[j].conj()
         return max_abs * torch.linalg.vector_norm(A @ (x / torch.linalg.vector_norm(x)))
     else: # must have A=0
@@ -157,7 +157,7 @@ def balance_kron_precond(Q):
     order = len(Q)  # order of tensor or the number of factors in Q 
     if order>1:
         norms = [torch.max(torch.abs(q)) for q in Q]
-        gmean = (torch.cumprod(torch.stack(norms), dim=0)[-1])**(1/order) # geometric mean 
+        gmean = torch.prod(torch.stack(norms))**(1/order) # geometric mean 
         for i, q in enumerate(Q):
             q.mul_(gmean/norms[i]) 
 
@@ -196,7 +196,7 @@ def update_precond_kron_eq(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, for_whitening=F
         if q.dim() < 2: # q is a diagonal matrix or scalar preconditioner
             ell = torch.max(torch.real(term1 + term2))
             L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
-            q.sub_(lr/L[i] * (term1 - term2) * q)      
+            q.mul_(1 - lr/L[i] * (term1 - term2))      
         else: # q is a matrix preconditioner 
             ell = norm_lower_bound_herm(term1 + term2)
             L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
@@ -248,7 +248,7 @@ def precond_grad_kron_whiten_qep(QL, exprs, G, lr=0.1, betaL=0.9, updateP=True):
                 term2 = total_numel/q.numel() * q * q.conj()
                 ell = torch.max(torch.real(term1 + term2)) 
                 L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
-                q.sub_(lr/L[i] * (term1 - term2) * q)
+                q.mul_(1 - lr/L[i] * (term1 - term2))
             else: # matrix Q
                 term2 = total_numel/q.shape[0] * q @ q.H
                 ell = norm_lower_bound_herm(term1 + term2)
@@ -275,7 +275,7 @@ def precond_grad_kron_whiten_qeq(QL, exprs, G, lr=0.1, betaL=0.9, updateP=True):
                 term2 = total_numel/q.numel() # times I
                 ell = torch.max(torch.real(term1)) + term2 
                 L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
-                q.sub_(lr/L[i] * q * (term1 - term2))
+                q.mul_(1 - lr/L[i] * (term1 - term2))
             else: # matrix Q
                 term2 = total_numel/q.shape[0] # times I
                 ell = norm_lower_bound_herm(term1) + term2
@@ -341,6 +341,7 @@ class KronWhiten:
         self._preconditioner_max_skew = preconditioner_max_skew
         params_with_grad = [params_with_grad,] if isinstance(params_with_grad, torch.Tensor) else params_with_grad
         self._params_with_grad = [param for param in params_with_grad if param.requires_grad] # double check requires_grad flag 
+        self._num_params = sum([p.numel() for p in self._params_with_grad])
         if preconditioner_init_scale is None:
             self._QLs_exprs = None # initialize on the fly 
             print("FYI: Will set the preconditioner initial scale on the fly. Recommend to set it manually.")
@@ -367,14 +368,6 @@ class KronWhiten:
         """
         Performs one step of PSGD with the Kronecker product gradient/momentum whitening preconditioner.
         """
-        def adjusted_lr(g):
-            lr = self.lr_params
-            if self.grad_clip_max_amp < float("inf"):
-                amp = torch.sqrt(torch.real(torch.mean(g * g.conj())))
-                if amp > self.grad_clip_max_amp:
-                    lr = lr * self.grad_clip_max_amp / amp
-            return lr 
-        
         with torch.enable_grad():
             closure_returns = closure()
             loss = closure_returns if isinstance(closure_returns, torch.Tensor) else closure_returns[0]
@@ -403,11 +396,17 @@ class KronWhiten:
                 pre_grads = [self._precond_grad(*QL_exprs, m, self.lr_preconditioner, self.betaL, updateP) 
                              for (QL_exprs, m, updateP) in zip(self._QLs_exprs, self._ms, conds)]
         else: # already whitened gradients, just clear the momentum buffers and counter.  
-            self._ms, self._counter_m = None, 0              
+            self._ms, self._counter_m = None, 0      
+
+        lr = self.lr_params
+        if self.grad_clip_max_amp < float("inf"):
+            avg_amp = torch.sqrt(torch.real(sum([torch.sum(g*g.conj()) for g in pre_grads]))/self._num_params)
+            if avg_amp > self.grad_clip_max_amp:
+                lr = lr * self.grad_clip_max_amp / avg_amp
             
-        # Update the parameters
-        [param.subtract_(adjusted_lr(g) * g.view_as(param)) for (param, g) in zip(self._params_with_grad, pre_grads)]
-        
+        # Update the parameters. 
+        [param.subtract_(lr*g.view_as(param)) for (param, g) in zip(self._params_with_grad, pre_grads)]        
+
         # return whatever closure returns
         return closure_returns
     
@@ -431,7 +430,7 @@ def update_precond_kron_newton_qep(QL, exprs, V, Hvp, lr=0.1, betaL=0.9):
         if q.dim() < 2: # diagonal or scalar Q 
             ell = torch.max(torch.real(term1 + term2)) 
             L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
-            q.sub_(lr/L[i] * (term1 - term2) * q)
+            q.mul_(1 - lr/L[i] * (term1 - term2))
         else: # matrix Q
             ell = norm_lower_bound_herm(term1 + term2) 
             L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
@@ -452,7 +451,7 @@ def update_precond_kron_newton_qeq(QL, exprs, V, Hvp, lr=0.1, betaL=0.9):
         if q.dim() < 2: # diagonal or scalar Q 
             ell = torch.max(torch.real(term1 + term2)) 
             L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
-            q.sub_(lr/L[i] * q * (term1 - term2))
+            q.mul_(1 - lr/L[i] * (term1 - term2))
         else: # matrix Q
             ell = norm_lower_bound_herm(term1 + term2) 
             L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
