@@ -322,7 +322,7 @@ ax2.plot(
 """
 PSGD, Kron, gradient whitening, dQ={EQ, QE, QUAD, QEP}
 """
-for dQ in ["EQ", "QE", "QUAD", "QEP"]:
+for dQ in ["EQ", "QEQ", "QUAD", "QEP"]:
     net = copy.deepcopy(Net).to(device)
     
     lr0 = 1e-3  # keep the same as Adam
@@ -386,7 +386,7 @@ ax1.legend(
     [
         "Adam",
         r"PSGD, $\mathcal{E}Q$",
-        r"PSGD, $Q\mathcal{E}$",
+        r"PSGD, $Q\mathcal{E}Q$",
         "PSGD, QUAD",
         r"PSGD, $Q\mathcal{E}P$",
     ],
@@ -401,14 +401,14 @@ ax2.legend(
     [
         "Adam",
         r"PSGD, $\mathcal{E}Q$",
-        r"PSGD, $Q\mathcal{E}$",
+        r"PSGD, $Q\mathcal{E}Q$",
         "PSGD, QUAD",
         r"PSGD, $Q\mathcal{E}P$",
     ],
     fontsize=7,
 )
-ax2.set_ylim([min(TestAcc), max(TestAcc)])
 ax2.set_title("(b)", fontsize=7)
 
 plt.savefig("vit_adam_vs_psgd.svg")
+plt.savefig("vit_adam_vs_psgd.eps")
 plt.show()
