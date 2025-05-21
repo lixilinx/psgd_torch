@@ -17,14 +17,28 @@ from dataclasses import dataclass
 import matplotlib.pyplot as plt
 import tiktoken
 
+import numpy as np 
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
 sys.path.append("..")
-import preconditioned_stochastic_gradient_descent as psgd
+import psgd
 
 device = torch.device("cuda")
+
+torch.set_default_dtype(torch.bfloat16)
+
+def set_seed(seed):
+    # from chatgpt 
+    np.random.seed(seed)                   # NumPy RNG
+    torch.manual_seed(seed)                # PyTorch CPU RNG
+    torch.cuda.manual_seed(seed)           # PyTorch GPU RNG (if using CUDA)
+
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+set_seed(42)
 
 """
 Prepare the dataset
@@ -312,8 +326,8 @@ AdamW vs PSGD-affine-whitening on a tiny gpt model.
 We align their settings, and the only difference is preconditioner.   
 """
 
-batchsize = 80
-block_size = 100  # quadratic growth wrt block size!
+batchsize = 128
+block_size = 128
 num_iterations = 100_000
 eval_every = num_iterations // 100
 tinyConfig = GPTConfig(block_size=block_size, n_layer=6, n_head=12, n_embd=384)
@@ -334,6 +348,7 @@ def test(data, model):
     return total_loss.item() / num_trials
 
 
+plt.figure(figsize=(8, 4))
 ax1 = plt.subplot(121)
 ax2 = plt.subplot(122)
 ax1.yaxis.tick_right()
@@ -342,10 +357,9 @@ ax2.yaxis.tick_right()
 """
 AdamW 
 """
-lr0 = 1e-3
 decoupled_wd = 1e-2  # tiny model; no need of large wd
 gpt = copy.deepcopy(tinyGpt).to(device)
-opt = torch.optim.AdamW(gpt.parameters(), lr=lr0, weight_decay=decoupled_wd)
+opt = torch.optim.AdamW(gpt.parameters(), lr=1e-3, weight_decay=decoupled_wd)
 
 TrainLoss = []
 EvalLoss = []
@@ -370,17 +384,15 @@ for num_iter in range(num_iterations):
         EvalLoss.append(test(tokenized_data["eval"], gpt))
         print(f"AdamW, iter {num_iter + 1}, eval loss {EvalLoss[-1]}")
 
-    opt.param_groups[0]["lr"] -= lr0 / num_iterations
-    # opt.param_groups[0]["lr"] *= 0.1 ** (1 / num_iterations)
-
 total_time = time.time() - t0
 
+SmoothedTrainLoss = np.convolve(TrainLoss, np.ones(100)/100)[99:-99]
 ax1.plot(
-    torch.arange(1, len(TrainLoss) + 1).cpu() * total_time / len(TrainLoss),
-    TrainLoss,
+    torch.arange(1, len(SmoothedTrainLoss) + 1).to(torch.float32).cpu() * total_time / len(SmoothedTrainLoss),
+    SmoothedTrainLoss,
 )
 ax2.plot(
-    torch.arange(1, len(EvalLoss) + 1).cpu() * total_time / len(EvalLoss),
+    torch.arange(1, len(EvalLoss) + 1).to(torch.float32).cpu() * total_time / len(EvalLoss),
     EvalLoss,
 )
 
@@ -390,17 +402,17 @@ PSGD
 """
 gpt = copy.deepcopy(tinyGpt).to(device)
 
-lr0 = 1e-3  # keep the same setting as AdamW
 decoupled_wd = 1e-2  # keep the same setting as AdamW
-opt = psgd.Affine(
+opt = psgd.KronWhiten(
     gpt.parameters(),
     preconditioner_init_scale=1.0,
-    preconditioner_max_skew=10.0,
-    lr_params=lr0,
+    lr_params=1e-3/4, # reduce adam lr by sqrt((1 + 0.9)/(1 - 0.9)) times with momentum 0.9
     lr_preconditioner=0.1,
-    preconditioner_update_probability=1.0,
+    betaL=0.99,
+    preconditioner_update_probability=1.0, # anneal to 0.01 after 7K iterations 
     momentum=0.9,
-    preconditioner_type="whitening",
+    grad_clip_max_amp=1.0,
+    whiten_grad=False,
 )
 
 TrainLoss = []
@@ -413,8 +425,6 @@ for num_iter in range(num_iterations):
 
     def closure():
         _, loss = gpt(inputs, targets)
-        # L2 = 1e-6*sum([torch.sum(torch.rand([], dtype=p.dtype, device=p.device) * p * p) for p in opt._params_with_grad])
-        # L2 = 1e-6*sum([torch.sum(torch.rand_like(p) * p * p) for p in opt._params_with_grad])
         return loss
 
     with torch.no_grad():  # decoupled weight decay
@@ -429,22 +439,18 @@ for num_iter in range(num_iterations):
     if (num_iter + 1) % eval_every == 0:
         EvalLoss.append(test(tokenized_data["eval"], gpt))
         print(f"PSGD, iter {num_iter + 1}, eval loss {EvalLoss[-1]}")
-
-    opt.preconditioner_update_probability = max(
-        0.01, 0.1 ** (1 / 10000) * opt.preconditioner_update_probability
-    )
-    opt.lr_preconditioner = max(0.01, (0.1) ** (1 / 20000) * opt.lr_preconditioner)
-    opt.lr_params -= lr0 / num_iterations
-    # opt.lr_params *= 0.1 ** (1 / (num_iterations - 1))
+        
+        opt.lr_preconditioner = max(opt.lr_preconditioner/2, 0.01)
 
 total_time = time.time() - t0
 
+SmoothedTrainLoss = np.convolve(TrainLoss, np.ones(100)/100)[99:-99]
 ax1.plot(
-    torch.arange(1, len(TrainLoss) + 1).cpu() * total_time / len(TrainLoss),
-    TrainLoss,
+    torch.arange(1, len(SmoothedTrainLoss) + 1).to(torch.float32).cpu() * total_time / len(SmoothedTrainLoss),
+    SmoothedTrainLoss,
 )
 ax2.plot(
-    torch.arange(1, len(EvalLoss) + 1).cpu() * total_time / len(EvalLoss),
+    torch.arange(1, len(EvalLoss) + 1).to(torch.float32).cpu() * total_time / len(EvalLoss),
     EvalLoss,
 )
 
@@ -455,11 +461,11 @@ ax1.tick_params(labelsize=6)
 ax1.legend(
     [
         "Adam",
-        "PSGD",
+        "PSGD"
     ],
     fontsize=7,
 )
-ax1.set_ylim([min(TrainLoss), max(EvalLoss)])
+ax1.set_ylim(min(SmoothedTrainLoss) - 0.1, 1 + min(SmoothedTrainLoss))
 ax1.set_title("(a)", fontsize=7)
 
 ax2.set_xlabel("Wall time (s)", fontsize=6)
@@ -468,12 +474,13 @@ ax2.tick_params(labelsize=6)
 ax2.legend(
     [
         "Adam",
-        "PSGD",
+        "PSGD"
     ],
     fontsize=7,
 )
-ax2.set_ylim([min(EvalLoss), max(EvalLoss)])
+ax2.set_ylim(min(EvalLoss) - 0.1, 1 + min(EvalLoss))
 ax2.set_title("(b)", fontsize=7)
 
 plt.savefig("gpt2_adamw_vs_psgd.svg")
+plt.savefig("gpt2_adamw_vs_psgd.eps")
 plt.show()
