@@ -1,5 +1,5 @@
 ## Pytorch implementation of PSGD 
-The [old PSGD implementation](https://github.com/lixilinx/psgd_torch/blob/master/preconditioned_stochastic_gradient_descent.py) is deprecated. The [new PSGD implementation](https://github.com/lixilinx/psgd_torch/blob/master/psgd.py) is a superset of the old one, and further supports three more matmul-only/tri-solver-free methods for updating $Q$.  
+The [old PSGD implementation](https://github.com/lixilinx/psgd_torch/blob/master/preconditioned_stochastic_gradient_descent.py) is deprecated. The [new PSGD implementation](https://github.com/lixilinx/psgd_torch/blob/master/psgd.py) is a superset of the old one, and further supports three more matmul-only/inverse-free methods for updating $Q$. Recommended choices for dQ are QUAD and QEQ.   
 
 ### An overview
 PSGD (Preconditioned SGD) is a general purpose (mathematical and stochastic, convex and nonconvex) 2nd order optimizer. It reformulates a wide range of preconditioner estimation and Hessian fitting problems as a family of strongly convex Lie group optimization problems. 
@@ -50,7 +50,7 @@ Note 1: $v$ can be a nuisance or an auxiliary variable in the last two criteria 
 | $Q=(I+UV^T){\rm diag}(d)$, $U, V \in \mathbb{R}^{n\times r}$, $0\le r\ll n$ | $a=Qh$, $b=Q^{-T}v$, $Q\leftarrow Q-\mu{\rm diag}(a^2-b^2)Q/\max(a^2+b^2)$, $U\leftarrow U - \mu\frac{(aa^T-bb^T)V(I+V^TU)}{\lVert a\rVert \\, \lVert VV^Ta \rVert + \lVert b\rVert \\, \lVert VV^Tb\rVert }$, $V\leftarrow V - \mu\frac{ (I+VU^T)(aa^T-bb^T)U }{\lVert a\rVert \\, \lVert UU^Ta\rVert + \lVert b\rVert \\, \lVert UU^Tb\rVert}$ | $\mathcal{O}(rm^2)$ | $\mathcal{O}(rm^2)$ | LRAWhiten/Newton  |  
 | ${\rm diag}(q_1)\otimes{\rm diag}(q_2)\otimes\ldots$ | same as kron | $\mathcal{O}(m)$ | $\mathcal{O}(m^2)$ | KronWhiten/Newton | 
 
-Note 1: The other three more matmul-only (tri-solver-free) preconditioner update methods have similar forms and complexities ([ref](https://arxiv.org/abs/2402.11858) to be updated). 
+Note 1: The other three inverse-free preconditioner update methods have similar forms and complexities. Please check [ref](https://arxiv.org/abs/2402.11858) for further details. 
 
 Note 2: For the gradient/momentum whitening preconditioner, we simply replace pair $(v, h)$ with $(v, g)$, where $v$ is a dummy variable that can be optionally integrated out. 
 
@@ -76,10 +76,10 @@ E_v[B^HB] &= {\rm tr}\left(Q_2^{-1}Q_2^{-H}\right) \\, Q_1^{-H}Q_1^{-1}
 <img src="https://github.com/lixilinx/psgd_torch/blob/master/misc/psgd_numerical_stability.svg" width=90% height=90%>
 
 #### Implementation details 
-Optimizers with the criteria in Table I and preconditioner forms in Table II are wrapped into classes *KronWhiten/Newton*, *LRAWhiten/Newton* and *DenseNewton* for easy use.    
+Optimizers with the criteria in Table I and preconditioner forms in Table II are wrapped into classes *KronWhiten/Newton*, *LRAWhiten/Newton* and *DenseNewton* for easy use.     
 
 Three main differences from torch.optim.SGD: 
-1) The loss to be minimized is passed through as a closure to the optimizer to support more dynamic behaviors, notably, Hessian-vector product approximation with finite difference method when the 2nd order derivatives are unavailable. The closure should return a loss or an iterator with its first element as the loss.     
+1) The loss to be minimized is passed through as a closure to the optimizer to support more dynamic behaviors, notably, Hessian-vector product approximation with finite difference method when the 2nd order derivative is unavailable. The closure should return a loss or an iterator with its first element as the loss.     
 2) Momentum here is the moving average of gradient so that its setting is decoupled from the learning rate, which is always normalized in PSGD. 
 3) As any other regularizations, (coupled) weight decay should be explicitly realized by adding an $L2$ regularization to the loss. Similarly, decoupled weight decay is not included inside the PSGD implementations. <!--We recommend to randomize the regularization term, e.g., replacing the $L2$ one for a parameter $p$, say $0.5 \lambda \cdot {\rm sum}(p^2)$, with ${\rm rand}() \cdot \lambda\cdot {\rm sum}(p^2)$.--> 
 
@@ -90,6 +90,10 @@ A few more details. The Hessian-vector products are calculated as a vector-jacob
 There are plenty of demos: [Rosenbrock function minimization](https://github.com/lixilinx/psgd_torch/blob/master/hello_psgd.py), [vision transformer](https://github.com/lixilinx/psgd_torch/blob/master/misc/vit.py), [generative pre-trained transformer](https://github.com/lixilinx/psgd_torch/blob/master/misc/gpt2.py), [logistic regression](https://github.com/lixilinx/psgd_torch/blob/master/misc/mnist_logistic_regression.py), [tensor rank decomposition](https://github.com/lixilinx/psgd_torch/blob/master/demo_usage_of_all_preconditioners.py), etc.. For this tiny [vision transformer demo](https://github.com/lixilinx/psgd_torch/blob/master/misc/vit.py), the following results show that all the four PSGD-Kron-gradient-whitening preconditioners can improve the convergence a lot compared with Adam(W).      
 
 <img src="https://github.com/lixilinx/psgd_torch/blob/master/misc/vit_adam_vs_psgd.svg" width=70% height=70%>
+
+The inverse-free versions of PSGD also work well with half precision. Please check this [GPT2](https://github.com/lixilinx/psgd_torch/blob/master/misc/gpt2.py) example for reproducing the following results.
+
+<img src="https://github.com/lixilinx/psgd_torch/blob/master/misc/gpt2_adamw_vs_psgd.svg" width=70% height=70%>
 
 <!--
 [Rosenbrock function](https://github.com/lixilinx/psgd_torch/blob/master/hello_psgd.py): see how simple to apply PSGD to convex and stochastic optimizations. The most important three settings are: preconditioner_init_scale (unnormalized), lr_params (normalized) and lr_preconditioner (normalized). 
@@ -121,6 +125,6 @@ There are plenty of demos: [Rosenbrock function minimization](https://github.com
 1) Preconditioned stochastic gradient descent, [arXiv:1512.04202](https://arxiv.org/abs/1512.04202), 2015. (General ideas of PSGD, preconditioner fitting criteria and Kronecker product preconditioners.)
 2) Preconditioner on matrix Lie group for SGD, [arXiv:1809.10232](https://arxiv.org/abs/1809.10232), 2018. (Focus on affine Lie group preconditioners, including feature normalization or whitening (per batch or layer) as special affine preconditioners. Use PSGD for gradient whitening.)
 3) Black box Lie group preconditioners for SGD, [arXiv:2211.04422](https://arxiv.org/abs/2211.04422), 2022. (Mainly about the LRA preconditioner. I also have prepared [these supplementary materials](https://drive.google.com/file/d/1CTNx1q67_py87jn-0OI-vSLcsM1K7VsM/view) for detailed math derivations.)
-4) Stochastic Hessian fittings with Lie groups, [arXiv:2402.11858](https://arxiv.org/abs/2402.11858), 2024 (to be updated). (Convergence properties of PSGD, also a good summary of PSGD. The Hessian fitting problem is convex in the Euclidean space and the manifold of SPD matrices, but it's strongly convex only in the quotient set ${\rm GL}(n, \mathbb{R})/R_{\rm polar}$, or group ${\rm GL}(n, \mathbb{R})$ if we don't care $Q$'s rotation ambiguity.)
+4) Stochastic Hessian fittings with Lie groups, [arXiv:2402.11858](https://arxiv.org/abs/2402.11858), 2024. (Properties of PSGD, also a good summary of PSGD. The Hessian fitting problem is shown to be strongly convex in ${\rm GL}(n, \mathbb{R})$ under certain mild assumptions.)
 5) Curvature-informed SGD via general purpose Lie-group preconditioners, [arXiv:2402.04553](https://arxiv.org/abs/2402.04553), 2024. (Plenty of benchmark results and analyses for PSGD vs. other optimizers.)
 6) There are a few more efficient and specialized PSGD implementations: Evan's [JAX](https://github.com/evanatyourservice/psgd_jax) and [Torch](https://github.com/evanatyourservice/kron_torch) versions, Lucas' [Heavyball](https://github.com/ClashLuke/HeavyBall). Also my outdated and unmaintained Tensorflow code: [TF 1.x](https://github.com/lixilinx/psgd_tf/releases/tag/1.3) and [TF 2.x](https://github.com/lixilinx/psgd_tf). 
