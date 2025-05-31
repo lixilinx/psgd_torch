@@ -24,24 +24,23 @@ It supports all the four methods for updating Q,
 and can be a good alternative to the BFGS like quasi-Newton optimizers as no line search is required. 
 
 Xi-Lin Li, lixilinx@gmail.com; in April and May, 2025. 
-Main refs: https://arxiv.org/abs/1512.04202; https://arxiv.org/abs/2402.11858 (to be updated). 
+Main refs: https://arxiv.org/abs/1512.04202; https://arxiv.org/abs/2402.11858. 
 """
 
 import opt_einsum
 import torch
 
 
-def norm_lower_bound_herm(A):
+def norm_lower_bound_spd(A):
     """
-    Returns a cheap lower bound for the spectral norm of a symmetric or Hermitian matrix A.
+    Returns a cheap lower bound for the spectral norm of a symmetric positive definite matrix A.
     """
-    max_abs = torch.max(torch.abs(A)) # used to normalize A to avoid numerically under/over-flow
+    max_abs = torch.max(A.diagonal().real) # used to normalize A to avoid numerical under/over-flow
     if max_abs > 0:
         A = A/max_abs
-        aa = torch.real(A * A.conj())
-        j = torch.argmax(torch.sum(aa, dim=1))
-        x = A @ A[j].conj()
-        return max_abs * torch.linalg.vector_norm(A @ (x / torch.linalg.vector_norm(x)))
+        j = torch.argmax(torch.real(torch.sum(A * A.conj(), dim=1)))
+        x = A[j] @ A
+        return max_abs * torch.linalg.vector_norm((x / torch.linalg.vector_norm(x)) @ A)
     else: # must have A=0
         return max_abs 
     
@@ -198,7 +197,7 @@ def update_precond_kron_eq(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, for_whitening=F
             L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
             q.mul_(1 - lr/L[i] * (term1 - term2))      
         else: # q is a matrix preconditioner 
-            ell = norm_lower_bound_herm(term1 + term2)
+            ell = norm_lower_bound_spd(term1 + term2)
             L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
             q.sub_(lr/L[i] * torch.triu(term1 - term2) @ q)
 
@@ -251,7 +250,7 @@ def precond_grad_kron_whiten_qep(QL, exprs, G, lr=0.1, betaL=0.9, updateP=True):
                 q.mul_(1 - lr/L[i] * (term1 - term2))
             else: # matrix Q
                 term2 = total_numel/q.shape[0] * q @ q.H
-                ell = norm_lower_bound_herm(term1 + term2)
+                ell = norm_lower_bound_spd(term1 + term2)
                 L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
                 q.sub_(lr/L[i] * (term1 - term2) @ q)
                     
@@ -278,7 +277,7 @@ def precond_grad_kron_whiten_qeq(QL, exprs, G, lr=0.1, betaL=0.9, updateP=True):
                 q.mul_(1 - lr/L[i] * (term1 - term2))
             else: # matrix Q
                 term2 = total_numel/q.shape[0] # times I
-                ell = norm_lower_bound_herm(term1) + term2
+                ell = norm_lower_bound_spd(term1) + term2
                 L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
                 q.sub_(lr/L[i] * (q @ term1 - q * term2))
                 
@@ -309,7 +308,7 @@ def precond_grad_kron_whiten_quad(QL, exprs, G, lr=0.1, betaL=0.9, updateP=True)
                 q.mul_(gain * gain) 
             else: # matrix Q
                 term2 = total_numel/q.shape[0] # times I
-                ell = norm_lower_bound_herm(term1) + term2
+                ell = norm_lower_bound_spd(term1) + term2
                 L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
                 p = q - lr/2/L[i] * (term1 @ q - term2 * q) 
                 p = p - lr/2/L[i] * (p @ term1 - p * term2) 
@@ -432,7 +431,7 @@ def update_precond_kron_newton_qep(QL, exprs, V, Hvp, lr=0.1, betaL=0.9):
             L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
             q.mul_(1 - lr/L[i] * (term1 - term2))
         else: # matrix Q
-            ell = norm_lower_bound_herm(term1 + term2) 
+            ell = norm_lower_bound_spd(term1 + term2) 
             L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
             q.sub_(lr/L[i] * (term1 - term2) @ q)
 
@@ -453,7 +452,7 @@ def update_precond_kron_newton_qeq(QL, exprs, V, Hvp, lr=0.1, betaL=0.9):
             L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
             q.mul_(1 - lr/L[i] * (term1 - term2))
         else: # matrix Q
-            ell = norm_lower_bound_herm(term1 + term2) 
+            ell = norm_lower_bound_spd(term1 + term2) 
             L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
             q.sub_(lr/L[i] * q @ (term1 - term2))
     
@@ -478,7 +477,7 @@ def update_precond_kron_newton_quad(QL, exprs, V, Hvp, lr=0.1, betaL=0.9):
             gain = 1 - lr/2/L[i] * (term1 - term2)
             q.mul_(gain * gain)
         else: # matrix Q
-            ell = norm_lower_bound_herm(term1 + term2) 
+            ell = norm_lower_bound_spd(term1 + term2) 
             L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
             err = lr/2/L[i] * (term1 - term2)
             p = q - err @ q     # p = q - lr/L[i]/2 * (term1 - term2) @ q
