@@ -16,6 +16,10 @@ The new PSGD-Kron Newton/Whitening preconditioners support four kinds of local c
     This last choice works very well if it does. Q is in the general linear group.  
     But, one drawback is that Q might get stuck around ill-conditioned matrices (not strongly convex). 
 
+The QUAD formulae can be used to update P directly (see older commit 0fc33cd). 
+I call this choice QUAD4P. It still is a good choice for optimization with single precision. 
+Unlike QUAD, QUAD4P does not work well with half precision. Use it with caution.  
+
 The PSGD-LRA Newton/Whitening preconditioners still adopt local coordinate dQ = mathcal{E} * Q, 
 and needs a small linear solver to update the preconditioner.
 
@@ -23,7 +27,7 @@ I also keep the PSGD dense matrix Newton-type preconditioner here to illustrate 
 It supports all the four methods for updating Q, 
 and can be a good alternative to the BFGS like quasi-Newton optimizers as no line search is required. 
 
-Xi-Lin Li, lixilinx@gmail.com; in April and May, 2025. 
+Xi-Lin Li, lixilinx@gmail.com; in April ~ June, 2025. 
 Main refs: https://arxiv.org/abs/1512.04202; https://arxiv.org/abs/2402.11858. 
 """
 
@@ -73,6 +77,8 @@ def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QEQ"):
 
         Please check https://drive.google.com/file/d/1CEEq7A3_l8EcPEDa_sYtqr5aMLVeZWL7/view?usp=drive_link for notations and derivations. 
     """
+    if dQ == "QUAD4P": # the only case that we fit P directly; so square Scale 
+        Scale *= Scale 
     shape = t.shape 
     if len(shape)==0: # scalar 
         Q = [Scale * torch.ones_like(t),]
@@ -144,9 +150,11 @@ def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QEQ"):
         return [[Q, L], (exprP, exprGs, exprQs)]
     elif dQ == "EQ": 
         return [[Q, L], (exprP, exprGs, exprA)]
-    else:
-        assert (dQ == "QEQ") or (dQ == "QUAD") 
+    elif (dQ == "QEQ") or (dQ == "QUAD"):
         return [[Q, L], (exprP, exprGs)]
+    else: # the only case that we fit P directly 
+        assert dQ == "QUAD4P" 
+        return [[Q, L], (exprA, exprGs)]
 
 
 def balance_kron_precond(Q):
@@ -320,6 +328,38 @@ def precond_grad_kron_whiten_quad(QL, exprs, G, lr=0.1, betaL=0.9, updateP=True)
     return Pg
 
 
+def precond_grad_kron_whiten_quad4p(QL, exprs, G, lr=0.1, betaL=0.9, updateP=True):
+    """
+    The only case that we fit P directly (Q is P). 
+    """   
+    Q, L = QL
+    exprA, exprGs = exprs
+    Pg = exprA(*Q, G) # Q actually is P; so just applying all its factors once.   
+    
+    if updateP: # update preconditioner
+        total_numel = G.numel() 
+        for i, q in enumerate(Q):
+            term1 = exprGs[i](Pg, Pg.conj())
+            if q.dim() < 2: # diagonal or scalar Q 
+                term2 = total_numel/q.numel() # times I
+                ell = torch.max(torch.real(term1)) + term2 
+                L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+                gain = 1 - lr/L[i] * (term1 - term2)
+                q.mul_(gain * gain) 
+            else: # matrix Q
+                term2 = total_numel/q.shape[0] # times I
+                ell = norm_lower_bound_spd(term1) + term2
+                L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+                p = q - lr/L[i] * (term1 @ q - term2 * q) 
+                p = p - lr/L[i] * (p @ term1 - p * term2) 
+                q.data = (p + p.H)/2 # p must be symmetric/hermitian  
+                
+        if torch.rand([]) < 0.01: # balance factors of Q
+            balance_kron_precond(Q)
+                    
+    return Pg
+
+
 class KronWhiten:
     """
     Implements the PSGD optimizer with the Kronecker product gradient/momentum whitening preconditioner.
@@ -357,9 +397,12 @@ class KronWhiten:
             self._precond_grad = precond_grad_kron_whiten_eq
         elif dQ == "QEQ":
             self._precond_grad = precond_grad_kron_whiten_qeq
-        else:
-            assert dQ == "QUAD"
+        elif dQ == "QUAD":
             self._precond_grad = precond_grad_kron_whiten_quad
+        else: # the only case that fits P directly 
+            assert dQ == "QUAD4P"
+            assert max([torch.finfo(p.dtype).eps for p in self._params_with_grad]) < 1e-6, "Directly fitting P needs at least single precision"
+            self._precond_grad = precond_grad_kron_whiten_quad4p
 
 
     @torch.no_grad()
@@ -488,6 +531,34 @@ def update_precond_kron_newton_quad(QL, exprs, V, Hvp, lr=0.1, betaL=0.9):
         balance_kron_precond(Q)
 
 
+def update_precond_kron_newton_quad4p(QL, exprs, V, Hvp, lr=0.1, betaL=0.9):
+    """
+    The only case that fits P directly.  
+    """   
+    Q, L = QL
+    exprA, exprGs = exprs
+    Ph = exprA(*Q, Hvp) # Q actually is P; so only need to apply its factors once.  
+
+    for i, q in enumerate(Q):
+        term1 = exprGs[i](Ph, Ph.conj())
+        term2 = exprGs[i](V, V.conj())
+        if q.dim() < 2: # diagonal or scalar Q 
+            ell = torch.max(torch.real(term1 + term2)) 
+            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+            gain = 1 - lr/L[i] * (term1 - term2)
+            q.mul_(gain * gain)
+        else: # matrix Q
+            ell = norm_lower_bound_spd(term1 + term2) 
+            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+            err = lr/L[i] * (term1 - term2)
+            p = q - err @ q     # p = q - lr/L[i] * (term1 - term2) @ q
+            p = p - p @ err     # p = p - lr/L[i] * p @ (term1 - term2)
+            q.data = (p + p.H)/2 # p must be symmetric or hermitian  
+    
+    if torch.rand([]) < 0.01: # balance factors of Q
+        balance_kron_precond(Q)
+
+
 class KronNewton:
     """
     Implements the Kronecker product Newton-type preconditioner as a class.
@@ -509,7 +580,8 @@ class KronNewton:
         self._preconditioner_max_skew = preconditioner_max_skew
         params_with_grad = [params_with_grad,] if isinstance(params_with_grad, torch.Tensor) else params_with_grad
         self._params_with_grad = [param for param in params_with_grad if param.requires_grad] # double check requires_grad flag 
-        self._delta_param_scale = (max([torch.finfo(p.dtype).eps for p in self._params_with_grad])) ** 0.5
+        eps = max([torch.finfo(p.dtype).eps for p in self._params_with_grad])
+        self._delta_param_scale = eps ** 0.5
         if preconditioner_init_scale is None:
             self._QLs_exprs = None # initialize on the fly 
             print("FYI: Will set the preconditioner initial scale on the fly. Recommend to set it manually.")
@@ -520,16 +592,21 @@ class KronNewton:
         if not exact_hessian_vector_product:
             print("FYI: Approximate Hvp with finite-difference method. Make sure that: 1) the closure behaves like a pure function; 2) delta param scale is proper.")
         self._dQ = dQ
-        self._precond_grad = precond_grad_kron
-        if dQ == "QUAD":
-            self._update_precond = update_precond_kron_newton_quad
-        elif dQ == "QEP":
-            self._update_precond = update_precond_kron_newton_qep
-        elif dQ == "EQ":
-            self._update_precond = update_precond_kron_eq
+        if dQ == "QUAD4P": # the only case that fits P directly 
+            self._update_precond = update_precond_kron_newton_quad4p
+            self._precond_grad = lambda QL, exprs, G: exprs[0](*QL[0], G) # it's exprA(*Q, G) 
+            assert eps < 1e-6, "Directly fitting P needs at least single precision" 
         else:
-            assert dQ == "QEQ"
-            self._update_precond = update_precond_kron_newton_qeq            
+            self._precond_grad = precond_grad_kron
+            if dQ == "QUAD":
+                self._update_precond = update_precond_kron_newton_quad
+            elif dQ == "QEP":
+                self._update_precond = update_precond_kron_newton_qep
+            elif dQ == "EQ":
+                self._update_precond = update_precond_kron_eq
+            else:
+                assert dQ == "QEQ"
+                self._update_precond = update_precond_kron_newton_qeq            
 
 
     @torch.no_grad()
@@ -937,6 +1014,18 @@ def update_precond_dense_quad(Q, L, v, h, lr=0.1, betaL=0.9):
     Q.data = (p + p.T)/2 
 
 
+def update_precond_dense_quad4p(Q, L, v, h, lr=0.1, betaL=0.9):
+    """
+    The only case that fits P directly. 
+    """
+    a = Q @ h # Q actually is P; so just apply it once. 
+    ell = torch.sum(a*a + v*v)
+    L.data = torch.max(betaL*L + (1 - betaL)*ell, ell)
+    p = Q - lr/L * (a @ (a.T @ Q) - v @ (v.T @ Q)) 
+    p = p - lr/L * ((p @ a) @ a.T - (p @ v) @ v.T) 
+    Q.data = (p + p.T)/2 
+
+
 class DenseNewton:
     """
     Implements the PSGD dense matrix Newton-type preconditioner as a class. 
@@ -966,6 +1055,8 @@ class DenseNewton:
         if preconditioner_init_scale is None: # initialize Q on the fly
             self._Q = None 
         else:
+            if dQ == "QUAD4P": # Q actually is P 
+                preconditioner_init_scale *= preconditioner_init_scale
             self._Q = torch.eye(num_params, dtype=dtype, device=device) * preconditioner_init_scale
         self._L = torch.zeros([], dtype=dtype, device=device) # Lipschitz constant estimation for the psgd criterion 
         self._m, self._counter_m = None, 0 # buffer and counter for momentum 
@@ -973,7 +1064,11 @@ class DenseNewton:
         if not exact_hessian_vector_product:
             print("FYI: Approximate Hvp with finite-difference method. Make sure that: 1) the closure behaves like a pure function; 2) delta param scale is proper.")
         self._dQ = dQ
-        if dQ == "QUAD":
+        if dQ == "QUAD4P":
+            self._update_precond = update_precond_dense_quad4p
+            self._precond_grad = lambda Q, g: Q @ g
+            assert torch.finfo(dtype).eps < 1e-6, "Directly fitting P needs at least single precision" 
+        elif dQ == "QUAD":
             self._update_precond = update_precond_dense_quad
             self._precond_grad = lambda Q, g: Q @ (Q @ g) # Q is symmetric; just save one transpose 
         else:
@@ -1020,6 +1115,8 @@ class DenseNewton:
             h = torch.cat([torch.reshape(h, [-1, 1]) for h in Hvs]) 
             if self._Q is None: # initialize Q on the fly if it is None
                 scale = (torch.mean(v*v))**(1/4) * (torch.mean(h**4))**(-1/8)
+                if self._dQ == "QUAD4P": # Q actually is P in this case 
+                    scale *= scale 
                 self._Q = torch.eye(len(v), dtype=v.dtype, device=v.device) * scale
 
             # update preconditioner 
