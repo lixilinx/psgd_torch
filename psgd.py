@@ -48,20 +48,23 @@ def norm_lower_bound_spd(A):
     else: # must have A=0
         return max_abs 
     
-    
+def lift2single(x):
+    # lift half or lower precision to single precision; leave single or higher precision unchanged  
+    return x.to(torch.float32) if torch.finfo(x.dtype).eps > 1e-6 else x
+
 #############       Begin of PSGD Kronecker product preconditioners       #############         
 
 
 def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QEQ"):
     """
-    For a scalar or tensor t, we initialize its states (preconditioner Q and Lipschitz constant L), 
+    For a scalar or tensor t, we initialize its states (preconditioner Q and Lipschitz smoothness constant L), 
     and reusable contraction expressions for updating Q and preconditioning gradient.
     
     1, The preconditioner Q is initialized to 
         Q = Scale * I = Scale * kron(eye(t.shape[0]), eye(t.shape[1]), ...)
        where the eye(.) may be replaced with diag(ones(.)) if that dim is too large, determined by max_size and max_skew.
        
-       The Lipschitz constant L is initialized to zero. 
+       The Lipschitz smoothness constant L for Q is initialized to zero. 
        
     2, A series of enisum contract expressions. The following subscript examples are for a 5th order tensor.  
         2.1, exprP is the expression for applying the Preconditioner on the gradient, e.g.,
@@ -78,11 +81,11 @@ def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QEQ"):
         Please check https://drive.google.com/file/d/1CEEq7A3_l8EcPEDa_sYtqr5aMLVeZWL7/view?usp=drive_link for notations and derivations. 
     """
     if dQ == "QUAD4P": # the only case that we fit P directly; so square Scale 
-        Scale *= Scale 
+        Scale = Scale ** 2 
     shape = t.shape 
     if len(shape)==0: # scalar 
         Q = [Scale * torch.ones_like(t),]
-        L = [torch.zeros_like(t.real),]
+        L = [lift2single(torch.zeros_like(t.real)),]
         exprA = opt_einsum.contract_expression(",->", Q[0].shape, t.shape)
         exprP = opt_einsum.contract_expression(",,->", Q[0].shape, Q[0].shape, t.shape) 
         exprGs = [opt_einsum.contract_expression(",->", t.shape, t.shape),]
@@ -98,7 +101,7 @@ def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QEQ"):
         piece1A, piece2A, piece3A = [], "", "" # used for getting the subscripts for exprA
         piece1P, piece2P, piece3P, piece4P = [], [], "", "" # used for getting the subscripts for exprP
         for i, size in enumerate(shape):
-            L.append(torch.zeros([], dtype=t.real.dtype, device=t.device))
+            L.append(lift2single(torch.zeros([], dtype=t.real.dtype, device=t.device)))
             if size <= 1 or size > max_size or size**2 > max_skew * t.numel():
                 # use diagonal matrix as preconditioner for this dim 
                 Q.append(scale * torch.ones(size, dtype=t.dtype, device=t.device))
@@ -171,7 +174,7 @@ def balance_kron_precond(Q):
 
 def update_precond_kron_eq(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, for_whitening=False):
     """
-    Update Kron preconditioner Q as dQ = E*Q and Lipschitz constant L with (v, hvp) pair (V, Hvp). 
+    Update Kron preconditioner Q as dQ = E*Q and Lipschitz smoothness constant L with (v, hvp) pair (V, Hvp). 
     If used for gradient/momentum whitening, we also return the whitend gradient/momentum. 
     """
     Q, L = QL
@@ -362,7 +365,23 @@ def precond_grad_kron_whiten_quad4p(QL, exprs, G, lr=0.1, betaL=0.9, updateP=Tru
 
 class KronWhiten:
     """
-    Implements the PSGD optimizer with the Kronecker product gradient/momentum whitening preconditioner.
+    Implements the PSGD optimizer with the Kronecker product gradient/momentum whitening preconditioner. 
+    Most of the time, the hyperparameter name says it all. Here are some comments on a few key hyperparameters.  
+ 
+    1, preconditioner_max_size and preconditioner_max_skew. These two together control the complexity of the preconditioners. 
+    For example, we are to precondition a 2D gradient with shape 10 x 50. 
+    With preconditioner_max_size 20, we use a dense preconditioner for the first dim since 10 <= 20 and diagonal preconditioner for the second dim since 50 > 20. 
+    With preconditioner_max_skew 1.5, we use a dense preconditioner for the first dim since 10/50 <= 1.5  and diagonal preconditioner for the second dim since 50/10 > 1.5.
+ 
+    2, grad_clip_max_amp and betaL. These two together help to stabilize the training. 
+    PSGD here tries to normalize the gradients to unit amplitude. This can be problematic when gradients approach zeros. 
+    One way is to clip the preconditioned gradients if their amplitudes exceed grad_clip_max_amp, say 3.0. 
+    Another way is to increase betaL (say to 0.999), the EMA factor for the L-smoothness constant (wrt Q) estimation. 
+    Other heuristic methods, like damping the gradient with noise or avoiding updating Q with tiny gradients, are not implemented.     
+
+    3, Lastly, dQ is for the selection of geometry for preconditioner update. Both QEQ and QUAD are good choices. 
+    Q is initialized to preconditioner_init_scale * eye. Boolean setting whiten_grad decides whether to whiten gradient or momentum. 
+    Always good to check https://arxiv.org/abs/2402.11858 for math details. 
     """
     def __init__(self,  params_with_grad, 
                  preconditioner_max_size=float("inf"), preconditioner_max_skew=1.0, preconditioner_init_scale:float|None=None,
@@ -371,7 +390,7 @@ class KronWhiten:
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner 
-        self.betaL = betaL # beta for Lipschitz constant estimation; set to a large value for sparse gradients 
+        self.betaL = betaL # beta for Lipschitz smoothness constant estimation; set to a large value for sparse gradients 
         self.momentum = momentum if (0<momentum<1) else 0.0
         self.grad_clip_max_amp = grad_clip_max_amp # clip grad once its avg amplitude exceeds this max amplitude 
         self.preconditioner_update_probability = preconditioner_update_probability
@@ -561,8 +580,27 @@ def update_precond_kron_newton_quad4p(QL, exprs, V, Hvp, lr=0.1, betaL=0.9):
 
 class KronNewton:
     """
-    Implements the Kronecker product Newton-type preconditioner as a class.
-    Be extra cautious when using the finite difference method for Hvp approximation (the closure must behave like a pure function). 
+    Implements the Kronecker product Newton-type preconditioner as a class. 
+    Most of the time, the hyperparameter name says it all. Here are some comments on a few key parameters.  
+
+    1, preconditioner_max_size and preconditioner_max_skew. These two together control the complexity of the preconditioners. 
+    For example, we are to precondition a 2D gradient with shape 10 x 50. 
+    With preconditioner_max_size 20, we use a dense preconditioner for the first dim since 10 <= 20 and diagonal preconditioner for the second dim since 50 > 20. 
+    With preconditioner_max_skew 1.5, we use a dense preconditioner for the first dim since 10/50 <= 1.5  and diagonal preconditioner for the second dim since 50/10 > 1.5.
+
+    2, grad_clip_max_norm and betaL. These two together help to stabilize the training. 
+    First, grad_clip_max_norm is used to clip the preconditioned gradient to stabilize the optimization as in the classic trust region method. 
+    Second, a large betaL (say 0.999), the EMA factor for the L-smoothness constant (wrt Q) estimation, also improves the stability. 
+    For problems with vanishing or ill-conditioned Hessians, it is also good to regularize the loss with a small L2 term. 
+
+    3, exact_hessian_vector_product. 
+    By setting this flag to False, the finite difference method will be used for Hvp approximation. 
+    Be cautious with the finite difference method (possible numerical issues; the closure must behave like a pure function).
+
+    4, Lastly, dQ is for the selection of geometry for preconditioner update. Both QEQ and QUAD are good choices. 
+    Both lr_params and lr_preconditioner are normalized learning rates. 
+    Q is initialized to preconditioner_init_scale * eye. 
+    Always good to check https://arxiv.org/abs/2402.11858 for math details. 
     """
     def __init__(self,  params_with_grad, preconditioner_max_size=float("inf"), preconditioner_max_skew=1.0, preconditioner_init_scale:float|None=None,
                         lr_params=0.01, lr_preconditioner=0.1, betaL=0.9, momentum=0.0,
@@ -571,7 +609,7 @@ class KronNewton:
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner     
-        self.betaL = betaL # beta for Lipschitz constant estimation; set to a large value for sparse Hvp   
+        self.betaL = betaL # beta for Lipschitz smoothness constant estimation; set to a large value for sparse Hvp   
         self.momentum = momentum if (0<momentum<1) else 0.0
         self.grad_clip_max_norm = grad_clip_max_norm
         self.preconditioner_update_probability = preconditioner_update_probability
@@ -691,7 +729,7 @@ def IpUVtmatvec(U, V, x):
 def update_precond_lra(UVd, Luvd, v, h, lr=0.1, betaL=0.9, for_whitening=False):
     """
     Update LRA preconditioner Q = (I + U*V')*diag(d) with (vector, Hessian-vector product) = (v, h).
-    State variables (U, V, d) and their Lipschitz constant estimates (Lu, Lv, Ld) are updated inplace. 
+    State variables (U, V, d) and their Lipschitz smoothness constant estimates (Lu, Lv, Ld) are updated inplace. 
     When it is used for updating the gradient/momentum whitening preconditioner, we return P*g to save conputations.                  
     U, V, d, v, and h all are either matrices or column vectors.  
     """
@@ -759,9 +797,22 @@ def precond_grad_lra(UVd, g):
 
 class LRAWhiten:
     """
-    Implements the PSGD LRA gradient/momentum whitening preconditioner as a class.
-    By default, we whiten the gradient. 
-    One can set rank r to zero to get the diagonal preconditioner. 
+    Implements the PSGD LRA gradient/momentum whitening preconditioner as a class. 
+    Most of the time, the hyperparameter name says it all. Here are some comments on a few key parameters.  
+
+    1, rank_of_approximation. 
+    Preconditioner Q has a diagonal part and a low rank part, whose rank is decided by this setting. 
+    Rank 0 reduces Q to a diagonal preconditioner. 
+ 
+    2, grad_clip_max_amp and betaL. These two together help to stabilize the training. 
+    PSGD here tries to normalize the gradients to unit amplitude. This can be problematic when gradients approach zeros. 
+    One way is to clip the preconditioned gradients if their amplitudes exceed grad_clip_max_amp, say 3.0. 
+    Another way is to increase betaL (say to 0.999), the EMA factor for the L-smoothness constant (wrt Q) estimation. 
+    Other heuristic methods, like damping the gradient with noise or avoiding updating Q with tiny gradients, are not implemented.  
+
+    3, Lastly, Q is initialized to preconditioner_init_scale * eye. 
+    Boolean setting whiten_grad decides whether to whiten gradient or momentum. 
+    Always good to check https://arxiv.org/abs/2402.11858 for math details. 
     """
     def __init__(self,  params_with_grad, rank_of_approximation:int=10, preconditioner_init_scale:float|None=None,
                         lr_params=0.001, lr_preconditioner=0.1, betaL=0.9, momentum=0.0,
@@ -790,7 +841,7 @@ class LRAWhiten:
             print("FYI: Will set the preconditioner initial scale on the fly. Recommend to set it manually.")
         else:
             self._UVd.append(torch.ones(num_params, 1, dtype=dtype, device=device) * preconditioner_init_scale)
-        self._Luvd = [torch.zeros([], dtype=dtype, device=device) for _ in range(3)]
+        self._Luvd = [lift2single(torch.zeros([], dtype=dtype, device=device)) for _ in range(3)]
         self._m, self._counter_m = None, 0 # momentum buffer and counter 
         self._whiten_grad = whiten_grad
         if (not whiten_grad) and (self.momentum==0): # expect momentum > 0 when whiten_grad = False
@@ -853,9 +904,25 @@ class LRAWhiten:
 
 class LRANewton:
     """
-    Implements the PSGD LRA Newton-type preconditioner as a class.
-    One can set the rank r to zero to get a diagonal preconditioner. 
-    Be extra cautious when using the finite difference method for Hvp approximation (the closure must behave like a pure function).
+    Implements the PSGD LRA Newton-type preconditioner as a class. 
+    Most of the time, the hyperparameter name says it all. Here are some comments on a few key parameters.  
+
+    1, rank_of_approximation. 
+    Preconditioner Q has a diagonal part and a low rank part, whose rank is decided by this setting. 
+    Rank 0 reduces Q to a diagonal preconditioner. 
+
+    2, grad_clip_max_norm and betaL. These two together help to stabilize the training.
+    First, grad_clip_max_norm is used to clip the preconditioned gradient to stabilize the optimization as in the classic trust region method.
+    Second, a large betaL (say 0.999), the EMA factor for the L-smoothness constant (wrt Q) estimation, also improves the stability.
+    For problems with vanishing or ill-conditioned Hessians, it is also good to regularize the loss with a small L2 term.
+
+    3, exact_hessian_vector_product. 
+    By setting this flag to False, the finite difference method will be used for Hvp approximation. 
+    Be cautious with the finite difference method (possible numerical issues; the closure must behave like a pure function).
+
+    4, Lastly, Q is initialized to preconditioner_init_scale * eye. 
+    Both lr_params and lr_preconditioner are normalized learning rates. 
+    Always good to check https://arxiv.org/abs/2402.11858 for math details.
     """
     def __init__(self,  params_with_grad, rank_of_approximation:int=10, preconditioner_init_scale:float|None=None,
                         lr_params=0.01, lr_preconditioner=0.1, betaL=0.9, momentum=0.0,
@@ -886,7 +953,7 @@ class LRANewton:
             print("FYI: Will set the preconditioner initial scale on the fly. Recommend to set it manually.")
         else:
             self._UVd.append(torch.ones(num_params, 1, dtype=dtype, device=device) * preconditioner_init_scale)
-        self._Luvd = [torch.zeros([], dtype=dtype, device=device) for _ in range(3)]
+        self._Luvd = [lift2single(torch.zeros([], dtype=dtype, device=device)) for _ in range(3)]
         self._m, self._counter_m = None, 0 # momentum buffer and counter 
         self._exact_hessian_vector_product = exact_hessian_vector_product
         if not exact_hessian_vector_product:
@@ -1058,7 +1125,7 @@ class DenseNewton:
             if dQ == "QUAD4P": # Q actually is P 
                 preconditioner_init_scale *= preconditioner_init_scale
             self._Q = torch.eye(num_params, dtype=dtype, device=device) * preconditioner_init_scale
-        self._L = torch.zeros([], dtype=dtype, device=device) # Lipschitz constant estimation for the psgd criterion 
+        self._L = lift2single(torch.zeros([], dtype=dtype, device=device)) # Lipschitz smoothness constant estimation for the psgd criterion 
         self._m, self._counter_m = None, 0 # buffer and counter for momentum 
         self._exact_hessian_vector_product = exact_hessian_vector_product
         if not exact_hessian_vector_product:
