@@ -734,20 +734,18 @@ def update_precond_lra(UVd, Luvd, v, h, lr=0.1, betaL=0.9):
     U, V, d = UVd
     Lu, Lv, Ld = Luvd
 
+    # Approximately balancing U and V such that U^T U = V^T V (exact balancing needs three EVDs)
+    UtU, VtV = U.t() @ U, V.t() @ V
+    E = 0.1 * (UtU - VtV)/(torch.trace(UtU) + torch.trace(VtV))
+    U.sub_(U @ E)
+    V.add_(V @ E)
+
     Qh = IpUVtmatvec(U, V, d * h)
 
     IpVtU = V.t().mm(U)
     IpVtU.diagonal().add_(1) # avoid forming matrix I explicitly 
     invQtv = v/d
     invQtv = invQtv - V.mm(torch.linalg.solve(IpVtU.t(), U.t().mm(invQtv)))   
-    
-    # Balance the numerical dynamic ranges of U and V. 
-    # Not optional as Lu and Lv are not scaling invariant. 
-    normU = torch.linalg.vector_norm(U)
-    normV = torch.linalg.vector_norm(V)
-    rho = torch.sqrt(normU/normV)
-    U.div_(rho)
-    V.mul_(rho)
 
     a, b = Qh, invQtv        
     aa, bb = a * a, b * b
