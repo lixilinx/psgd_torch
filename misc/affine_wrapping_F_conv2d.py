@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torchvision import datasets, transforms
 
 sys.path.append("..")
-import preconditioned_stochastic_gradient_descent as psgd
+import psgd
 
 device = torch.device("cuda")
 
@@ -157,7 +157,7 @@ for resample in [False, True]:
     lenet5 = copy.deepcopy(net).to(device)
     
     TrainLosses, best_test_loss = [], 1.0
-    lr = 0.2
+    lr = 0.1
     total_time = 0.0
     for epoch in range(num_iterations):
         total_loss = 0.0
@@ -180,7 +180,6 @@ for resample in [False, True]:
         TrainLosses.append(total_loss/len(train_loader))
     
         best_test_loss = min(best_test_loss, test_loss())
-        lr *= (0.1) ** (1 / (num_iterations - 1))
         print(
             f"Epoch: {epoch + 1}; SGD best test classification error rate: {best_test_loss}"
         )
@@ -213,7 +212,7 @@ for resample in [False, True]:
     
     
     TrainLosses, best_test_loss = [], 1.0
-    lr, grad_norm_clip_thr = 1.0, 10.0
+    lr, grad_norm_clip_thr = 1.0, 1.0
     total_time = 0.0
     for epoch in range(num_iterations):
         total_loss = 0.0
@@ -245,7 +244,6 @@ for resample in [False, True]:
         TrainLosses.append(total_loss/len(train_loader))
     
         best_test_loss = min(best_test_loss, test_loss())
-        lr *= (0.1) ** (1 / (num_iterations - 1))
         print(f"Epoch: {epoch + 1}; (basically Shampoo) best test classification error rate: {best_test_loss}")
     
     ax1.semilogy(torch.arange(1, num_iterations + 1).cpu(), TrainLosses)
@@ -259,14 +257,12 @@ for resample in [False, True]:
         PSGD with Affine preconditioner 
     """
     lenet5 = copy.deepcopy(net).to(device)
-    opt = psgd.Affine(
+    opt = psgd.KronWhiten(
         lenet5.parameters(),
+        preconditioner_max_skew=float("inf"),
         preconditioner_init_scale=1.0,
-        lr_params=0.1,
-        lr_preconditioner=0.1,
-        grad_clip_max_norm=10.0,
+        grad_clip_max_amp=1.0,
     )
-    # opt = psgd.LRA(lenet5.parameters(), preconditioner_init_scale=None, lr_params=0.1, lr_preconditioner=0.1, grad_clip_max_norm=10.0)
     
     TrainLosses, best_test_loss = [], 1.0
     total_time = 0.0
@@ -280,17 +276,14 @@ for resample in [False, True]:
     
             def closure():
                 xentropy = train_loss(data, target) 
-                # we add L2 term, eps*sum(p*p), to avoid hessian underflow
-                L2 = 1e-9*sum([torch.sum(torch.rand_like(p) * p * p) for p in opt._params_with_grad])
-                return (xentropy + L2, xentropy)
+                return xentropy
     
-            _, loss = opt.step(closure)
+            loss = opt.step(closure)
             total_loss += loss.item()
         total_time += time.time() - t0
         TrainLosses.append(total_loss/len(train_loader))
     
         best_test_loss = min(best_test_loss, test_loss())
-        opt.lr_params *= (0.01) ** (1 / (num_iterations - 1))
         print(
             f"Epoch: {epoch + 1}; PSGD best test classification error rate: {best_test_loss}"
         )
@@ -309,7 +302,7 @@ ax1.legend(
     [
         "SGD (w/o resample)",
         "Shampoo (w/o resample)",
-        "PSGD-Affine (w/o resample)",
+        "PSGD-KronWhiten (w/o resample)",
         "SGD (w/ resample)",
         "Shampoo (w/ resample)",
         "PSGD-Affine (w/ resample)",
@@ -325,7 +318,7 @@ ax2.legend(
     [
         "SGD (w/o resample)",
         "Shampoo (w/o resample)",
-        "PSGD-Affine (w/o resample)",
+        "PSGD-KronWhiten (w/o resample)",
         "SGD (w/ resample)",
         "Shampoo (w/ resample)",
         "PSGD-Affine (w/ resample)",

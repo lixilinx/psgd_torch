@@ -10,7 +10,7 @@ import opt_einsum
 
 sys.path.append("..")
 from psgd import (init_kron, 
-                  precond_grad_kron_whiten_qep, 
+                  update_precond_kron_whiten_qep, 
                   update_precond_kron_newton_qep, 
                   precond_grad_kron)
 
@@ -41,7 +41,7 @@ for dtype in [torch.float64, torch.float32]:
     for i in range(num_iterations):
         V = torch.randn(N, N, N, N, N, dtype=dtype)
         G = opt_einsum.contract("aA,bB,cC,dD,eE, ABCDE->abcde", H1,H2,H3,H4,H5, V)  
-        update_precond_kron_newton_qep(QL, exprs, V, G)
+        update_precond_kron_newton_qep(QL, exprs, V, G, damping=0.0)
         precond_grad = precond_grad_kron(QL, exprs, G)
         err = torch.mean((precond_grad - V)**2).item()
         errs.append(err)
@@ -69,7 +69,8 @@ for dtype in [torch.float64, torch.float32]:
     for i in range(num_iterations):
         V = torch.randn(N, N, N, N, N, dtype=dtype)
         G = opt_einsum.contract("aA,bB,cC,dD,eE, ABCDE->abcde", H1,H2,H3,H4,H5, V)  
-        precond_grad = precond_grad_kron_whiten_qep(QL, exprs, G)
+        update_precond_kron_whiten_qep(QL, exprs, G, damping=0.0)
+        precond_grad = precond_grad_kron(QL, exprs, G)
         err = torch.mean((precond_grad - V)**2).item()
         errs.append(err)
     plt.semilogy(errs)
