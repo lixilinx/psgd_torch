@@ -736,9 +736,13 @@ def update_precond_lra(UVd, Luvd, v, h, lr=0.1, betaL=0.9):
 
     # Approximately balancing U and V such that U^T U = V^T V (exact balancing needs three EVDs)
     UtU, VtV = U.t() @ U, V.t() @ V
-    E = 0.1 * (UtU - VtV)/(torch.trace(UtU) + torch.trace(VtV))
-    U.sub_(U @ E)
-    V.add_(V @ E)
+    trUtU, trVtV = torch.trace(UtU), torch.trace(VtV)
+    rho = (trUtU/trVtV) ** (1/4) # will scale U and V as U <-- U/rho and V <-- V*rho
+    rho2 = rho * rho
+    E = 0.1 * (UtU/rho2 - VtV*rho2)/(trUtU/rho2 + trVtV*rho2) # errors after scaling U and V  
+    E2 = 0.5 * E @ E # using this E2 term to make (I - E + E^2/2)(I + E + E^2/2) = (I + E^2/2)^2 - E^2 = I + E^4/4 
+    U.div_(rho), V.mul_(rho) # scale U and V to have ||U||_F = ||V||_F
+    U.sub_(U @ (E - E2)), V.add_(V @ (E + E2)) # rotate (as tr(E)=0) U and V to approach U^TU = V^TV
 
     Qh = IpUVtmatvec(U, V, d * h)
 
@@ -791,7 +795,7 @@ def update_precond_lra_whiten(UVd, Luvd, g, lr=0.1, betaL=0.9, damping=1e-9):
     """
     Update the LRA whiten preconditioner. 
     """
-    v = torch.randn_like(g)
+    v = torch.randn_like(g) # est tr(inv(P)) as v^T inv(P) v; sign(v) is better?
     update_precond_lra(UVd, Luvd, v, g + damping*v, lr=lr, betaL=betaL)
 
 
