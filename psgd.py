@@ -736,7 +736,7 @@ def update_precond_lra(UVd, Luvd, v, h, lr=0.1, betaL=0.9):
 
     # Approximately balancing U and V such that U^T U = V^T V (exact balancing needs three EVDs)
     UtU, VtV = U.t() @ U, V.t() @ V
-    trUtU, trVtV = torch.trace(UtU), torch.trace(VtV)
+    trUtU, trVtV = torch.sum(UtU.diagonal()), torch.sum(VtV.diagonal())
     rho = (trUtU/trVtV) ** (1/4) # will scale U and V as U <-- U/rho and V <-- V*rho
     rho2 = rho * rho
     E = 0.1 * (UtU/rho2 - VtV*rho2)/(trUtU/rho2 + trVtV*rho2) # errors after scaling U and V  
@@ -745,14 +745,23 @@ def update_precond_lra(UVd, Luvd, v, h, lr=0.1, betaL=0.9):
     U.sub_(U @ (E - E2)), V.add_(V @ (E + E2)) # rotate (as tr(E)=0) U and V to approach U^TU = V^TV
 
     Qh = IpUVtmatvec(U, V, d * h)
+    Ph = d*IpUVtmatvec(V, U, Qh)
 
     IpVtU = V.t().mm(U)
     IpVtU.diagonal().add_(1) # avoid forming matrix I explicitly 
     invQtv = v/d
-    invQtv = invQtv - V.mm(torch.linalg.solve(IpVtU.t(), U.t().mm(invQtv)))   
+    LU, pivots = torch.linalg.lu_factor(lift2single(IpVtU))
+    invQtv = invQtv - V.mm(torch.linalg.lu_solve(LU, pivots, lift2single(U.t().mm(invQtv)), adjoint=True).to(V.dtype))
+    invPv  = invQtv - U.mm(torch.linalg.lu_solve(LU, pivots, lift2single(V.t().mm(invQtv))).to(U.dtype))
+    invPv = invPv/d
+
+    # update d 
+    Phh, vinvPv = Ph*h, v*invPv
+    ell = torch.max(torch.abs(Phh)) + torch.max(torch.abs(vinvPv))
+    Ld.data = torch.max(betaL*Ld + (1 - betaL)*ell, ell)
+    d.sub_(lr/Ld*(Phh - vinvPv)*d)  # d.mul_(1 - lr/Ld*(Phh - vinvPv)): larger roundoff errors, unstable with bfloat16 and lr<<1 
 
     a, b = Qh, invQtv        
-    aa, bb = a * a, b * b
     if torch.rand([]) < 0.5: # only update U
         atV = a.t().mm(V)
         btV = b.t().mm(V)
@@ -771,13 +780,6 @@ def update_precond_lra(UVd, Luvd, v, h, lr=0.1, betaL=0.9):
                torch.linalg.vector_norm(b)*torch.linalg.vector_norm(UUtb))
         Lv.data = torch.max(betaL*Lv + (1 - betaL)*ell, ell)
         V.sub_(lr/Lv * ( (a + V.mm(atU.t())).mm(atU) - (b + V.mm(btU.t())).mm(btU) ))
-    # always update d after U and V as its update impacts U and V too
-    ell = torch.max(aa + bb)
-    Ld.data = torch.max(betaL*Ld + (1 - betaL)*ell, ell)
-    s = 1 - lr/Ld * (aa - bb)
-    U.mul_(s)
-    V.div_(s)
-    d.mul_(s)
 
 
 def precond_grad_lra(UVd, g):
@@ -795,7 +797,7 @@ def update_precond_lra_whiten(UVd, Luvd, g, lr=0.1, betaL=0.9, damping=1e-9):
     """
     Update the LRA whiten preconditioner. 
     """
-    v = torch.randn_like(g) # est tr(inv(P)) as v^T inv(P) v; sign(v) is better?
+    v = torch.randn_like(g)
     update_precond_lra(UVd, Luvd, v, g + damping*v, lr=lr, betaL=betaL)
 
 
