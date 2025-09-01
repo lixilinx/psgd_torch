@@ -182,12 +182,12 @@ def update_precond_kron_eq(QL, exprs, V, Hvp, lr=0.1, betaL=0.9):
     Q, L = QL
     _, exprGs, exprA = exprs
         
-    def solve_triangular_right(X, A):
-        # return X @ inv(A)
-        if X.dim()>1: 
-            return torch.linalg.solve_triangular(A, X, upper=True, left=False)
-        else: # torch.linalg.solve_triangular complains if X.dim() < 2. So insert None.
-            return torch.linalg.solve_triangular(A, X[None,:], upper=True, left=False)[0]     
+    def solve_triangular_right(B, A):
+        # return B @ inv(A)
+        if B.dim()>1: 
+            return torch.linalg.solve_triangular(lift2single(A), lift2single(B), upper=True, left=False).to(B.dtype)
+        else: # torch.linalg.solve_triangular complains if B.dim() < 2. So insert None.
+            return (torch.linalg.solve_triangular(lift2single(A), lift2single(B[None,:]), upper=True, left=False)[0]).to(B.dtype)     
     
     A = exprA(*Q, Hvp)
 
@@ -206,7 +206,7 @@ def update_precond_kron_eq(QL, exprs, V, Hvp, lr=0.1, betaL=0.9):
         if q.dim() < 2: # q is a diagonal matrix or scalar preconditioner
             ell = torch.max(torch.real(term1 + term2))
             L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
-            q.mul_(1 - lr/L[i] * (term1 - term2))      
+            q.sub_(lr/L[i] * (term1 - term2) * q) # q.mul_(1 - lr/L[i] * (term1 - term2)): larger roundoff errors       
         else: # q is a matrix preconditioner 
             ell = norm_lower_bound_spd(term1 + term2)
             L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
@@ -404,7 +404,7 @@ class KronWhiten:
                 self._update_precond = update_precond_kron_whiten_eq
             elif dQ == "QEQ":
                 self._update_precond = update_precond_kron_whiten_qeq
-            elif dQ == "QUAD":
+            else:
                 assert dQ == "QUAD", "Invalid choice for dQ"
                 self._update_precond = update_precond_kron_whiten_quad
 
@@ -1054,7 +1054,7 @@ def update_precond_dense_eq(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
     Update dense matrix Newton-type preconditioner Q with local coordinate dQ = mathcal{E} * Q.
     """
     a = Q.mm(h + damping*torch.randn_like(h))
-    b = torch.linalg.solve_triangular(Q.t(), v, upper=False)
+    b = torch.linalg.solve_triangular(lift2single(Q.t()), lift2single(v), upper=False).to(v.dtype)
     ell = torch.sum(a*a + b*b)
     L.data = torch.max(betaL*L + (1 - betaL)*ell, ell)
     Q.sub_(lr/L * torch.triu(a.mm(a.t()) - b.mm(b.t())) @ Q)
