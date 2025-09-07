@@ -356,7 +356,7 @@ class KronWhiten:
  
     2, grad_clip_max_amp, betaL and damping. These three together help to stabilize the training. 
     PSGD here tries to normalize the gradients to unit amplitude. This can be problematic when gradients approach zeros. 
-    One way is to clip the preconditioned gradients if their amplitudes exceed grad_clip_max_amp, say 1.0.
+    The most effective way is to clip the preconditioned gradients if their amplitudes exceed grad_clip_max_amp, say 1.0.
     Another way is to damp and upper bound the fitted preconditioner such that P < eye/damping.   
     For extremely sparse gradients, increasing betaL (say to 0.999) helps a lot, where betaL is the EMA factor for the L-smoothness constant (wrt Q) estimation. 
 
@@ -367,7 +367,7 @@ class KronWhiten:
     def __init__(self,  params_with_grad, 
                  preconditioner_max_size=float("inf"), preconditioner_max_skew=1.0, preconditioner_init_scale:float|None=None,
                  lr_params=0.001, lr_preconditioner=0.1, betaL=0.9, damping=1e-9, momentum=0.0,
-                 grad_clip_max_amp=float("inf"), preconditioner_update_probability=1.0, whiten_grad=True, dQ="QEQ"):
+                 grad_clip_max_amp=float("inf"), preconditioner_update_probability=1.0, whiten_grad=True, dQ="QUAD"):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner 
@@ -391,6 +391,7 @@ class KronWhiten:
         self._whiten_grad = whiten_grad # set to False to whiten momentum.  
         if not whiten_grad:
             assert self.momentum > 0, "Cannot whiten momentum if the momentum setting is zero."
+            print(f"Recommend to reduce lr_params by {int(((1 + momentum)/(1 - momentum))**0.5)} times")
         self._dQ = dQ
         if dQ == "QUAD4P": # the only case that we fit P directly 
             assert max([torch.finfo(p.dtype).eps for p in self._params_with_grad]) < 1e-6, "Directly fitting P needs at least single precision"
@@ -420,8 +421,9 @@ class KronWhiten:
             grads = [g.squeeze() for g in torch.autograd.grad(loss, self._params_with_grad)]
             
         if self._QLs_exprs is None:
-            self._QLs_exprs = [init_kron(g, (torch.mean((torch.abs(g))**4))**(-1/8), 
-                                         self._preconditioner_max_size, self._preconditioner_max_skew, self._dQ) for g in grads]
+            scale = max([torch.mean((torch.abs(g))**4) for g in grads])
+            scale = (scale + self.damping**4)**(-1/8)
+            self._QLs_exprs = [init_kron(g, scale, self._preconditioner_max_size, self._preconditioner_max_skew, self._dQ) for g in grads]
             
         if self.momentum > 0:
             beta = min(self._counter_m/(1 + self._counter_m), self.momentum)
@@ -600,7 +602,7 @@ class KronNewton:
     def __init__(self,  params_with_grad, preconditioner_max_size=float("inf"), preconditioner_max_skew=1.0, preconditioner_init_scale:float|None=None,
                         lr_params=0.01, lr_preconditioner=0.1, betaL=0.9, damping=1e-9, momentum=0.0,
                         grad_clip_max_norm=float("inf"), preconditioner_update_probability=1.0,
-                        exact_hessian_vector_product=True, dQ="QEQ"):
+                        exact_hessian_vector_product=True, dQ="QUAD"):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner     
@@ -673,8 +675,9 @@ class KronNewton:
                 [p.sub_(v, alpha=self._delta_param_scale) for (p, v) in zip(self._params_with_grad, vs)] # remove the perturbation            
             
             if self._QLs_exprs is None: # initialize QLs on the fly if it is None 
-                self._QLs_exprs = [init_kron(h.squeeze(), (torch.mean((torch.abs(v))**2))**(1/4) * (torch.mean((torch.abs(h))**4))**(-1/8), 
-                                             self._preconditioner_max_size, self._preconditioner_max_skew, self._dQ) for (v, h) in zip(vs, Hvs)]
+                scale = (sum([torch.sum(torch.abs(v)**2) for v in vs])/sum([v.numel() for v in vs])) ** (1/4) # (mean(|v|^2))^(1/4)
+                scale = scale * (max([torch.mean((torch.abs(h))**4) for h in Hvs]) + self.damping**4) ** (-1/8) # (mean(|v|^2))^(1/4) * (mean(|h|^4))^(-1/8)
+                self._QLs_exprs = [init_kron(h.squeeze(), scale, self._preconditioner_max_size, self._preconditioner_max_skew, self._dQ) for h in Hvs]
             # update preconditioner
             [self._update_precond(*QL_exprs, v.squeeze(), h.squeeze(), lr=self.lr_preconditioner, betaL=self.betaL, damping=self.damping) 
              for (QL_exprs, v, h) in zip(self._QLs_exprs, vs, Hvs)]
@@ -812,7 +815,7 @@ class LRAWhiten:
  
     2, grad_clip_max_amp, betaL and damping. These three together help to stabilize the training. 
     PSGD here tries to normalize the gradients to unit amplitude. This can be problematic when gradients approach zeros. 
-    One way is to clip the preconditioned gradients when their amplitudes exceed grad_clip_max_amp, say 1.0. 
+    The most effective way is to clip the preconditioned gradients when their amplitudes exceed grad_clip_max_amp, say 1.0. 
     Another way is to damp and upper bound the fitted preconditioner as P < eye/damping. 
     For extremely sparse gradient, increasing betaL (say to 0.999) also helps a lot, where betaL is the EMA factor for the L-smoothness constant (wrt Q) estimation. 
     
@@ -853,6 +856,7 @@ class LRAWhiten:
         self._whiten_grad = whiten_grad
         if (not whiten_grad):
             assert self.momentum > 0, "Cannot whiten momentum if the momentum setting is zero."
+            print(f"Recommend to reduce lr_params by {int(((1 + momentum)/(1 - momentum))**0.5)} times")
 
 
     @torch.no_grad()
@@ -869,7 +873,7 @@ class LRAWhiten:
         grad = torch.cat([torch.reshape(g, [-1, 1]) for g in grads]) # column vector 
         
         if len(self._UVd) < 3: # initialize d on the fly 
-            self._UVd.append((torch.mean(grad**4))**(-1/8) * torch.ones_like(grad)) 
+            self._UVd.append((torch.mean(grad**4) + self.damping**4)**(-1/8) * torch.ones_like(grad)) 
 
         if self.momentum > 0:
             beta = min(self._counter_m/(1 + self._counter_m), self.momentum)
@@ -1004,7 +1008,7 @@ class LRANewton:
             v = torch.cat([torch.reshape(v, [-1, 1]) for v in vs]) # column vector
             h = torch.cat([torch.reshape(h, [-1, 1]) for h in Hvs]) # column vector  
             if len(self._UVd) < 3: # init d if it's not in the UVd list 
-                self._UVd.append((torch.mean(v*v))**(1/4) * (torch.mean(h**4))**(-1/8) * torch.ones_like(v))
+                self._UVd.append((torch.mean(v*v))**(1/4) * (torch.mean(h**4) + self.damping**4)**(-1/8) * torch.ones_like(v))
             
             # update preconditioner
             update_precond_lra_newton(self._UVd, self._Luvd, v, h, lr=self.lr_preconditioner, betaL=self.betaL, damping=self.damping)
@@ -1115,7 +1119,7 @@ class DenseNewton:
     def __init__(self, params_with_grad, preconditioner_init_scale:float|None=None,
                  lr_params=0.01, lr_preconditioner=0.1, betaL=0.9, damping=1e-9, momentum=0.0, 
                  grad_clip_max_norm=float("inf"), preconditioner_update_probability=1.0,
-                 exact_hessian_vector_product=True, dQ="QEQ"):
+                 exact_hessian_vector_product=True, dQ="QUAD"):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner
@@ -1194,7 +1198,7 @@ class DenseNewton:
             v = torch.cat([torch.reshape(v, [-1, 1]) for v in vs]) 
             h = torch.cat([torch.reshape(h, [-1, 1]) for h in Hvs]) 
             if self._Q is None: # initialize Q on the fly if it is None
-                scale = (torch.mean(v*v))**(1/4) * (torch.mean(h**4))**(-1/8)
+                scale = (torch.mean(v*v))**(1/4) * (torch.mean(h**4) + self.damping**4)**(-1/8)
                 if self._dQ == "QUAD4P": # Q actually is P in this case 
                     scale *= scale 
                 self._Q = torch.eye(len(v), dtype=v.dtype, device=v.device) * scale
