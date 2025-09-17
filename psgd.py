@@ -50,8 +50,8 @@ def norm_lower_bound_spd(A, pow_iters=4):
         j = torch.argmax(torch.real(torch.sum(A * A.conj(), dim=1)))
         x = A[j] @ A
         for _ in range(pow_iters):
-            x = x @ A   # caveat: not the same as x = torch.mv(A, x) for complex A  
             x /= x.abs().amax()
+            x = x @ A   # caveat: not the same as x = torch.mv(A, x) for complex A  
         return max_abs * torch.linalg.vector_norm((x / torch.linalg.vector_norm(x)) @ A)
     else: # virtually A=0
         return max_abs 
@@ -68,8 +68,8 @@ def norm_lower_bound_skh(A, pow_iters=4):
         j = torch.argmax(torch.real(torch.sum(A * A.conj(), dim=1)))
         x = A[j] @ A
         for _ in range(pow_iters):
-            x = x @ A   # caveat: not the same as x = -torch.mv(A, x) for complex A  
             x /= x.abs().amax()
+            x = x @ A   # caveat: not the same as x = -torch.mv(A, x) for complex A  
         return max_abs * torch.linalg.vector_norm((x / torch.linalg.vector_norm(x)) @ A)
     else: # virtually A=0
         return max_abs 
@@ -86,7 +86,7 @@ def procrustes_step(Q, max_step_size=1/8):
         min_U || U Q - I ||_F,   s.t. U^H U = I
     by rotating Q as exp(a R) Q, where R = Q^H - Q is the generator and ||a R|| < 1. 
 
-    Do not set max_step_size > 1/4 as we only approximate exp(a R) to its 2nd term. 
+    Do not set max_step_size > 1/4 as we only expand exp(a R) to its 2nd term. 
 
     Note that neither the group O(n) nor U(n) is simply connected. 
     Hence, such rotations cannot make all Q SPD, say a real Q with det(Q) < 0. 
