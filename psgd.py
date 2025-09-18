@@ -39,38 +39,42 @@ import opt_einsum
 import torch
 
 
-def norm_lower_bound_spd(A, pow_iters=4):
+def norm_lower_bound_spd(A, k=4, iters=5):
     """
-    Returns a cheap lower bound for the spectral norm of a symmetric positive definite matrix A.
-    Recommend to have at least two power iterations for tighter bound.   
+    Returns a cheap lower bound for the spectral norm of a symmetric positive definite matrix A, 
+    where k is the dim of subspace, and iters is the number of power iterations. 
+    A rough norm estimation is good, and we don't orthonormaliz the subspace vectors. 
     """
     max_abs = A.diagonal().real.amax() # used to normalize A to avoid numerical under/over-flow
     if max_abs > torch.finfo(max_abs.dtype).smallest_normal: # to avoid inf due to 1/subnormal or 1/0
         A = A/max_abs
-        j = torch.argmax(torch.real(torch.sum(A * A.conj(), dim=1)))
-        x = A[j] @ A
-        for _ in range(pow_iters):
+        power, j = torch.max(torch.real(torch.mean(A * A.conj(), dim=1)), 0)
+        x = (A[j] * torch.rsqrt(power) + torch.randn_like(A[:k])) @ A
+        for _ in range(iters):
             x /= x.abs().amax()
-            x = x @ A   # caveat: not the same as x = torch.mv(A, x) for complex A  
-        return max_abs * torch.linalg.vector_norm((x / torch.linalg.vector_norm(x)) @ A)
+            x = x @ A   
+        x = (x / torch.linalg.vector_norm(x, dim=1, keepdim=True)) @ A  
+        return max_abs * torch.amax(torch.linalg.vector_norm(x, dim=1))
     else: # virtually A=0
         return max_abs 
 
 
-def norm_lower_bound_skh(A, pow_iters=4):
+def norm_lower_bound_skh(A, k=4, iters=5):
     """
-    Returns a cheap lower bound for the spectral norm of a skew-Hermitian matrix A. 
-    Recommend to have at least two power iterations for tighter bound.
+    Returns a cheap lower bound for the spectral norm of a skew-Hermitian matrix A,
+    where k is the dim of subspace, and iters is the number of power iterations. 
+    A rough norm estimation is good, and we don't orthonormaliz the subspace vectors. 
     """
     max_abs = A.abs().amax() # used to normalize A to avoid numerical under/over-flow
     if max_abs > torch.finfo(max_abs.dtype).smallest_normal: # to avoid inf due to 1/subnormal or 1/0
         A = A/max_abs
-        j = torch.argmax(torch.real(torch.sum(A * A.conj(), dim=1)))
-        x = A[j] @ A
-        for _ in range(pow_iters):
+        power, j = torch.max(torch.real(torch.mean(A * A.conj(), dim=1)), 0)
+        x = (A[j] * torch.rsqrt(power) + torch.randn_like(A[:k])) @ A
+        for _ in range(iters):
             x /= x.abs().amax()
-            x = x @ A   # caveat: not the same as x = -torch.mv(A, x) for complex A  
-        return max_abs * torch.linalg.vector_norm((x / torch.linalg.vector_norm(x)) @ A)
+            x = x @ A  
+        x = (x / torch.linalg.vector_norm(x, dim=1, keepdim=True)) @ A   
+        return max_abs * torch.amax(torch.linalg.vector_norm(x, dim=1))
     else: # virtually A=0
         return max_abs 
     
@@ -88,8 +92,8 @@ def procrustes_step(Q, max_step_size=1/8):
 
     Do not set max_step_size > 1/4 as we only expand exp(a R) to its 2nd term. 
 
-    Note that neither the group O(n) nor U(n) is simply connected. 
-    Hence, such rotations cannot make all Q SPD, say a real Q with det(Q) < 0. 
+    Note that U(n) is connected and such rotations can make most complex Q SPD except when converged to saddle points. 
+    However, O(n) is not connected. Hence, such rotations (in the SO(n) group) can only make real Q SPD if det(Q) > 0. 
     """
     R = Q.H - Q 
     max_abs = R.abs().amax()
