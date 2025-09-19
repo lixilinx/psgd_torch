@@ -42,19 +42,28 @@ import torch
 def norm_lower_bound_spd(A, k=4, iters=5):
     """
     Returns a cheap lower bound for the spectral norm of a symmetric positive definite matrix A, 
-    where k is the dim of subspace, and iters is the number of power iterations. 
+    where k is the dim of subspace, and iters is the number of subspace iterations. 
     A rough norm estimation is good, and we don't orthonormaliz the subspace vectors. 
+
+    The initial noise vectors V are rotated such that its centroid aligns with the largest row of A. 
+    Hence, each row of V and the largest row of A has an angle about acos(1/sqrt(k)). 
+    This feature makes the subspace iteration more robust. 
     """
     max_abs = A.diagonal().real.amax() # used to normalize A to avoid numerical under/over-flow
     if max_abs > torch.finfo(max_abs.dtype).smallest_normal: # to avoid inf due to 1/subnormal or 1/0
         A = A/max_abs
-        power, j = torch.max(torch.real(torch.mean(A * A.conj(), dim=1)), 0)
-        x = (A[j] * torch.rsqrt(power) + torch.randn_like(A[:k])) @ A
+        norm, j = torch.max(torch.linalg.vector_norm(A, dim=1), 0)
+        a = A[j] # a is the largest row of A
+        V = torch.randn_like(A[:k]) # V ~ N(0, I); its rows are approximately orthogonal  
+        c = torch.mean(V, dim=0) # c is the centroid of V
+        u = norm * c + torch.linalg.vector_norm(c) * torch.sgn(torch.sum(c * a.conj())) * a 
+        u /= torch.linalg.vector_norm(u) # u is the Householder reflection vector
+        V -= 2 * torch.sum(u.conj() * V, dim=1, keepdim=True) * u # now centroid of V aligns with a
         for _ in range(iters):
-            x /= x.abs().amax()
-            x = x @ A   
-        x = (x / torch.linalg.vector_norm(x, dim=1, keepdim=True)) @ A  
-        return max_abs * torch.amax(torch.linalg.vector_norm(x, dim=1))
+            V /= V.abs().amax()
+            V = V @ A   
+        V /= torch.linalg.vector_norm(V, dim=1, keepdim=True)
+        return max_abs * torch.amax(torch.linalg.vector_norm(V @ A, dim=1))
     else: # virtually A=0
         return max_abs 
 
@@ -62,19 +71,28 @@ def norm_lower_bound_spd(A, k=4, iters=5):
 def norm_lower_bound_skh(A, k=4, iters=5):
     """
     Returns a cheap lower bound for the spectral norm of a skew-Hermitian matrix A,
-    where k is the dim of subspace, and iters is the number of power iterations. 
+    where k is the dim of subspace, and iters is the number of subspace iterations. 
     A rough norm estimation is good, and we don't orthonormaliz the subspace vectors. 
+
+    The initial noise vectors V are rotated such that its centroid aligns with the largest row of A. 
+    Hence, each row of V and the largest row of A has an angle about acos(1/sqrt(k)). 
+    This feature makes the subspace iteration more robust. 
     """
     max_abs = A.abs().amax() # used to normalize A to avoid numerical under/over-flow
     if max_abs > torch.finfo(max_abs.dtype).smallest_normal: # to avoid inf due to 1/subnormal or 1/0
         A = A/max_abs
-        power, j = torch.max(torch.real(torch.mean(A * A.conj(), dim=1)), 0)
-        x = (A[j] * torch.rsqrt(power) + torch.randn_like(A[:k])) @ A
+        norm, j = torch.max(torch.linalg.vector_norm(A, dim=1), 0)
+        a = A[j] # a is the largest row of A
+        V = torch.randn_like(A[:k]) # V ~ N(0, I); its rows are approximately orthogonal  
+        c = torch.mean(V, dim=0) # the centroid of V
+        u = norm * c + torch.linalg.vector_norm(c) * torch.sgn(torch.sum(c * a.conj())) * a 
+        u /= torch.linalg.vector_norm(u) # u is the Householder reflection vector
+        V -= 2 * torch.sum(u.conj() * V, dim=1, keepdim=True) * u # now centroid of V aligns with a
         for _ in range(iters):
-            x /= x.abs().amax()
-            x = x @ A  
-        x = (x / torch.linalg.vector_norm(x, dim=1, keepdim=True)) @ A   
-        return max_abs * torch.amax(torch.linalg.vector_norm(x, dim=1))
+            V /= V.abs().amax()
+            V = V @ A   
+        V /= torch.linalg.vector_norm(V, dim=1, keepdim=True)
+        return max_abs * torch.amax(torch.linalg.vector_norm(V @ A, dim=1))
     else: # virtually A=0
         return max_abs 
     
@@ -92,8 +110,8 @@ def procrustes_step(Q, max_step_size=1/8):
 
     Do not set max_step_size > 1/4 as we only expand exp(a R) to its 2nd term. 
 
-    Note that U(n) is connected and such rotations can make most complex Q SPD except when converged to saddle points. 
-    However, O(n) is not connected. Hence, such rotations (in the SO(n) group) can only make real Q SPD if det(Q) > 0. 
+    Note that U(n) is connected and such rotations can make most complex Q SPD except for convergence to saddle points. 
+    However, O(n) is not connected. Hence, such SO(n) rotations can only make real Q with det(Q) > 0 SPD. 
     """
     R = Q.H - Q 
     max_abs = R.abs().amax()
