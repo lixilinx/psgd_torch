@@ -405,14 +405,12 @@ gpt = copy.deepcopy(tinyGpt).to(device)
 decoupled_wd = 1e-2  # keep the same setting as AdamW
 opt = psgd.KronWhiten(
     gpt.parameters(),
-    preconditioner_init_scale=1.0,
-    lr_params=1e-3/4, # reduce adam lr by sqrt((1 + 0.9)/(1 - 0.9)) times with momentum 0.9
-    lr_preconditioner=0.1,
-    betaL=0.99,
-    preconditioner_update_probability=1.0, # anneal to 0.01 after 7K iterations 
+    preconditioner_max_skew=2,
     momentum=0.9,
+    lr_params=1e-3/4, # reduce adam lr by sqrt((1 + 0.9)/(1 - 0.9)) times with momentum 0.9
     grad_clip_max_amp=1.0,
     whiten_grad=False,
+    preconditioner_update_probability=1.0, # anneal to 0.01
 )
 
 TrainLoss = []
@@ -439,8 +437,8 @@ for num_iter in range(num_iterations):
     if (num_iter + 1) % eval_every == 0:
         EvalLoss.append(test(tokenized_data["eval"], gpt))
         print(f"PSGD, iter {num_iter + 1}, eval loss {EvalLoss[-1]}")
-        
-        opt.lr_preconditioner = max(opt.lr_preconditioner/2, 0.01)
+       
+        opt.preconditioner_update_probability = max(opt.preconditioner_update_probability * 0.1**0.1, 0.01)
 
 total_time = time.time() - t0
 
@@ -461,7 +459,7 @@ ax1.tick_params(labelsize=6)
 ax1.legend(
     [
         "Adam",
-        "PSGD"
+        r"PSGD, $dQ=Q^{0.5}\mathcal{E}Q^{1.5}$",
     ],
     fontsize=7,
 )
@@ -474,7 +472,7 @@ ax2.tick_params(labelsize=6)
 ax2.legend(
     [
         "Adam",
-        "PSGD"
+        r"PSGD, $dQ=Q^{0.5}\mathcal{E}Q^{1.5}$",
     ],
     fontsize=7,
 )

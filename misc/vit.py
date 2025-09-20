@@ -322,16 +322,15 @@ ax2.plot(
 """
 PSGD, Kron, gradient whitening, dQ={EQ, QE, QUAD, QEP}
 """
-for dQ in ["EQ", "QEQ", "QUAD", "QEP"]:
+for dQ in ["Q0.5EQ1.5",]:
     net = copy.deepcopy(Net).to(device)
     
     lr0 = 1e-3  # keep the same as Adam
     opt = psgd.KronWhiten(
         net.parameters(),
-        preconditioner_init_scale=1.0,
+        preconditioner_max_skew=2,
         lr_params=lr0,  # will aneal to lr0/num_epochs
-        lr_preconditioner=0.1,  # will anneal to 0.01
-        preconditioner_update_probability=1.0,  # will anneal to 0.01
+        preconditioner_update_probability=1.0,  # anneal to 0.01
         momentum=0.9,
         dQ=dQ,
     )
@@ -361,10 +360,7 @@ for dQ in ["EQ", "QEQ", "QUAD", "QEP"]:
         print(f"PSGD, epoch {epoch + 1}, best test accuracy {max(TestAcc)}")
     
         opt.lr_params -= lr0 / num_epochs
-        opt.lr_preconditioner = max(0.01, 0.1**0.05 * opt.lr_preconditioner)
-        opt.preconditioner_update_probability = max(
-            0.01, 0.1**0.1 * opt.preconditioner_update_probability
-        )
+        opt.preconditioner_update_probability = max(opt.preconditioner_update_probability * 0.1**0.1, 0.01)
     
     total_time = time.time() - t0
     
@@ -385,10 +381,7 @@ ax1.tick_params(labelsize=6)
 ax1.legend(
     [
         "Adam",
-        r"PSGD, $\mathcal{E}Q$",
-        r"PSGD, $Q\mathcal{E}Q$",
-        "PSGD, QUAD",
-        r"PSGD, $Q\mathcal{E}P$",
+        r"PSGD, $dQ=Q^{0.5}\mathcal{E}Q^{1.5}$",
     ],
     fontsize=7,
 )
@@ -400,10 +393,7 @@ ax2.tick_params(labelsize=6)
 ax2.legend(
     [
         "Adam",
-        r"PSGD, $\mathcal{E}Q$",
-        r"PSGD, $Q\mathcal{E}Q$",
-        "PSGD, QUAD",
-        r"PSGD, $Q\mathcal{E}P$",
+        r"PSGD, $dQ=Q^{0.5}\mathcal{E}Q^{1.5}$",
     ],
     fontsize=7,
 )

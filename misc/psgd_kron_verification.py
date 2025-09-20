@@ -21,7 +21,7 @@ torch.set_default_dtype(torch.float64)
 sys.path.append("..")
 from psgd import init_kron
 
-dQ = "QUAD"
+dQ = "Q0.5EQ1.5"
 if dQ == "QUAD4P": # fit P directly; not good for half-precision arithmetic
     precond_grad_kron = lambda QL, exprs, G: exprs[0](*QL[0], G) # it's exprA(*Q, G) 
     from psgd import update_precond_kron_whiten_quad4p as update_whiten
@@ -38,12 +38,15 @@ else: # fit Q
     elif dQ == "QEP":
         from psgd import update_precond_kron_whiten_qep as update_whiten
         from psgd import update_precond_kron_newton_qep as update_newton 
-    else: 
-        assert dQ == "QUAD"
+    elif dQ == "QUAD": 
         from psgd import update_precond_kron_whiten_quad as update_whiten
         from psgd import update_precond_kron_newton_quad as update_newton 
+    else:
+        assert dQ == "Q0.5EQ1.5"
+        from psgd import update_precond_kron_whiten_q0p5eq1p5 as update_whiten
+        from psgd import update_precond_kron_newton_q0p5eq1p5 as update_newton 
 
-num_iterations = 10000
+num_iterations = 2000
 
 #%% 
 print("Test case: scalar preconditioner")  
