@@ -46,25 +46,41 @@ def norm_lower_bound_spd(A, k=4, iters=5):
     A rough norm estimation is good, and we don't orthonormaliz the subspace vectors. 
 
     The initial noise vectors V are rotated such that its centroid aligns with the largest row of A. 
-    Hence, each row of V and the largest row of A has an angle about acos(1/sqrt(k)). 
+    Hence, each row of V and the largest row of A has an angle about acos(1/sqrt(k)) when k << dim(A). 
     This feature makes the subspace iteration more robust. 
     """
     max_abs = A.diagonal().real.amax() # used to normalize A to avoid numerical under/over-flow
-    if max_abs > torch.finfo(max_abs.dtype).smallest_normal: # to avoid inf due to 1/subnormal or 1/0
-        A = A/max_abs
-        norm, j = torch.max(torch.linalg.vector_norm(A, dim=1), 0)
-        a = A[j] # a is the largest row of A
-        V = torch.randn_like(A[:k]) # V ~ N(0, I); its rows are approximately orthogonal  
-        c = torch.mean(V, dim=0) # c is the centroid of V
-        u = norm * c + torch.linalg.vector_norm(c) * torch.sgn(torch.sum(c * a.conj())) * a 
-        u /= torch.linalg.vector_norm(u) # u is the Householder reflection vector
-        V -= 2 * torch.sum(u.conj() * V, dim=1, keepdim=True) * u # now centroid of V aligns with a
+    if max_abs > torch.finfo(max_abs.dtype).smallest_normal: 
+        A = A/max_abs 
+
+        # simplified implementation 
+        j = torch.argmax(torch.linalg.vector_norm(A, dim=1))
+        V = (A[j] + torch.randn(k, A.shape[1], dtype=A.dtype, device=A.device)) @ A
         for _ in range(iters):
             V /= V.abs().amax()
             V = V @ A   
-        V /= torch.linalg.vector_norm(V, dim=1, keepdim=True)
+        V /= torch.linalg.vector_norm(V, dim=1, keepdim=True) + 1e-9
         return max_abs * torch.amax(torch.linalg.vector_norm(V @ A, dim=1))
-    else: # virtually A=0
+
+        # # the exact implementation 
+        # norm_a, j = torch.max(torch.linalg.vector_norm(A, dim=1), 0)
+        # a = A[j] # a is the largest row of A
+        # V = torch.randn(k, A.shape[1], dtype=A.dtype, device=A.device)    
+        # c = torch.mean(V, dim=0) # c is the centroid of V
+        # u = norm_a * c + torch.linalg.vector_norm(c) * torch.sgn(torch.sum(c * a.conj())) * a 
+        # u /= torch.linalg.vector_norm(u) # u is the Householder reflection vector
+        # V -= 2 * torch.sum(u.conj() * V, dim=1, keepdim=True) * u # now centroid of V aligns with a
+        # for _ in range(iters):
+        #     V /= V.abs().amax()
+        #     V = V @ A   
+        # V /= torch.linalg.vector_norm(V, dim=1, keepdim=True)
+        # norm_A = max_abs * torch.amax(torch.linalg.vector_norm(V @ A, dim=1))
+        # if torch.isfinite(norm_A):
+        #     return norm_A
+        # else: # happens with a negligible but nonzero probability for small dim(A) 
+        #     print("Subspace iteration failed. Try again.")
+        #     return norm_lower_bound_spd(A, k=k, iters=iters)
+    else: # norm(A) is too small 
         return max_abs 
 
 
@@ -75,25 +91,41 @@ def norm_lower_bound_skh(A, k=4, iters=5):
     A rough norm estimation is good, and we don't orthonormaliz the subspace vectors. 
 
     The initial noise vectors V are rotated such that its centroid aligns with the largest row of A. 
-    Hence, each row of V and the largest row of A has an angle about acos(1/sqrt(k)). 
+    Hence, each row of V and the largest row of A has an angle about acos(1/sqrt(k)) when k << dim(A). 
     This feature makes the subspace iteration more robust. 
     """
     max_abs = A.abs().amax() # used to normalize A to avoid numerical under/over-flow
-    if max_abs > torch.finfo(max_abs.dtype).smallest_normal: # to avoid inf due to 1/subnormal or 1/0
+    if max_abs > torch.finfo(max_abs.dtype).smallest_normal:
         A = A/max_abs
-        norm, j = torch.max(torch.linalg.vector_norm(A, dim=1), 0)
-        a = A[j] # a is the largest row of A
-        V = torch.randn_like(A[:k]) # V ~ N(0, I); its rows are approximately orthogonal  
-        c = torch.mean(V, dim=0) # the centroid of V
-        u = norm * c + torch.linalg.vector_norm(c) * torch.sgn(torch.sum(c * a.conj())) * a 
-        u /= torch.linalg.vector_norm(u) # u is the Householder reflection vector
-        V -= 2 * torch.sum(u.conj() * V, dim=1, keepdim=True) * u # now centroid of V aligns with a
+
+        # simplified implementation 
+        j = torch.argmax(torch.linalg.vector_norm(A, dim=1))
+        V = (A[j] + torch.randn(k, A.shape[1], dtype=A.dtype, device=A.device)) @ A
         for _ in range(iters):
             V /= V.abs().amax()
             V = V @ A   
-        V /= torch.linalg.vector_norm(V, dim=1, keepdim=True)
+        V /= torch.linalg.vector_norm(V, dim=1, keepdim=True) + 1e-9
         return max_abs * torch.amax(torch.linalg.vector_norm(V @ A, dim=1))
-    else: # virtually A=0
+    
+        # # the exact implementation 
+        # norm_a, j = torch.max(torch.linalg.vector_norm(A, dim=1), 0)
+        # a = A[j] # a is the largest row of A
+        # V = torch.randn(k, A.shape[1], dtype=A.dtype, device=A.device)  
+        # c = torch.mean(V, dim=0) # the centroid of V
+        # u = norm_a * c + torch.linalg.vector_norm(c) * torch.sgn(torch.sum(c * a.conj())) * a 
+        # u /= torch.linalg.vector_norm(u) # u is the Householder reflection vector
+        # V -= 2 * torch.sum(u.conj() * V, dim=1, keepdim=True) * u # now centroid of V aligns with a
+        # for _ in range(iters):
+        #     V /= V.abs().amax()
+        #     V = V @ A   
+        # V /= torch.linalg.vector_norm(V, dim=1, keepdim=True)
+        # norm_A = max_abs * torch.amax(torch.linalg.vector_norm(V @ A, dim=1))
+        # if torch.isfinite(norm_A):
+        #     return norm_A
+        # else: # happens with a negligible but nonzero probability for small dim(A)
+        #     print("Subspace iteration failed. Try again.")
+        #     return norm_lower_bound_skh(A, k=k, iters=iters)
+    else: # norm(A) is too small  
         return max_abs 
     
 
