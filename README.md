@@ -1,5 +1,5 @@
 ## Pytorch implementation of PSGD 
-The [old PSGD implementation](https://github.com/lixilinx/psgd_torch/blob/master/preconditioned_stochastic_gradient_descent.py) is deprecated. The [new PSGD implementation](https://github.com/lixilinx/psgd_torch/blob/master/psgd.py) is a superset of the old one, and further supports three more matmul-only/inverse-free methods for updating $Q$. Recommended choices for dQ are QUAD and QEQ.   
+[2025 updates] The [old PSGD implementation](https://github.com/lixilinx/psgd_torch/blob/master/preconditioned_stochastic_gradient_descent.py) is deprecated. The [new PSGD implementation](https://github.com/lixilinx/psgd_torch/blob/master/psgd.py) is a superset of the old one, and further supports four more matmul-only/inverse-free geometries for updating $Q$. The default choice is $dQ=Q^{0.5} \mathcal{E} Q^{1.5}$. When $Q$ is fitted with bfloat16 precision, recommend to set lr_preconditioner $\gg 0.01$, say $\ge 0.1$, to avoid round-off errors. For the KronWhiten class, recommend to whiten and clip the momentum if the gradients are sparse over time.  
 
 ### An overview
 PSGD (Preconditioned SGD) is a general purpose (mathematical and stochastic, convex and nonconvex) 2nd order optimizer. It reformulates a wide range of preconditioner estimation and Hessian fitting problems as a family of strongly convex Lie group optimization problems. 
@@ -50,7 +50,7 @@ Note 1: $v$ can be a nuisance or an auxiliary variable in the last two criteria 
 | $Q=(I+UV^T){\rm diag}(d)$, $U, V \in \mathbb{R}^{n\times r}$, $0\le r\ll n$ | $a=Qh$, $b=Q^{-T}v$, $d\leftarrow \left( 1-\mu\frac{h\cdot (Ph)-v\cdot (P^{-1}v)}{\max\|h\cdot (Ph)\| +\max\|v\cdot (P^{-1}v)\|}\right) \cdot d$, $U\leftarrow U - \mu\frac{(aa^T-bb^T)V(I+V^TU)}{\lVert a\rVert \\, \lVert VV^Ta \rVert + \lVert b\rVert \\, \lVert VV^Tb\rVert }$, $V\leftarrow V - \mu\frac{ (I+VU^T)(aa^T-bb^T)U }{\lVert a\rVert \\, \lVert UU^Ta\rVert + \lVert b\rVert \\, \lVert UU^Tb\rVert}$ | $\mathcal{O}(rm^2)$ | $\mathcal{O}(rm^2)$ | LRAWhiten/Newton  |  
 | ${\rm diag}(q_1)\otimes{\rm diag}(q_2)\otimes\ldots$ | same as kron | $\mathcal{O}(m)$ | $\mathcal{O}(m^2)$ | KronWhiten/Newton | 
 
-Note 1: The other three inverse-free preconditioner update methods have similar forms and complexities. Please check [ref](https://arxiv.org/abs/2402.11858) for further details. 
+Note 1: The other four inverse-free preconditioner update methods have similar forms and complexities. Please check [ref](https://arxiv.org/abs/2402.11858) for further details. 
 
 Note 2: For the gradient/momentum whitening preconditioner, we simply replace pair $(v, h)$ with $(v, g)$, where $v$ is a dummy variable that can be optionally integrated out. 
 
@@ -88,11 +88,11 @@ A few more details. The Hessian-vector products are calculated as a vector-jacob
 
 ### Demos 
 
-There are plenty of demos: [Rosenbrock function minimization](https://github.com/lixilinx/psgd_torch/blob/master/hello_psgd.py), [vision transformer](https://github.com/lixilinx/psgd_torch/blob/master/misc/vit.py), [generative pre-trained transformer](https://github.com/lixilinx/psgd_torch/blob/master/misc/gpt2.py), [logistic regression](https://github.com/lixilinx/psgd_torch/blob/master/misc/mnist_logistic_regression.py), [tensor rank decomposition](https://github.com/lixilinx/psgd_torch/blob/master/demo_usage_of_all_preconditioners.py), etc.. For this tiny [vision transformer demo](https://github.com/lixilinx/psgd_torch/blob/master/misc/vit.py), the following results show that all the four PSGD-Kron-gradient-whitening preconditioners can improve the convergence a lot compared with Adam(W).      
+There are plenty of demos: [Rosenbrock function minimization](https://github.com/lixilinx/psgd_torch/blob/master/hello_psgd.py), [vision transformer](https://github.com/lixilinx/psgd_torch/blob/master/misc/vit.py), [generative pre-trained transformer](https://github.com/lixilinx/psgd_torch/blob/master/misc/gpt2.py), [logistic regression](https://github.com/lixilinx/psgd_torch/blob/master/misc/mnist_logistic_regression.py), [tensor rank decomposition](https://github.com/lixilinx/psgd_torch/blob/master/demo_usage_of_all_preconditioners.py), etc.. For this tiny [vision transformer demo](https://github.com/lixilinx/psgd_torch/blob/master/misc/vit.py), the PSGD-Kron-gradient-whitening preconditioner can outperform Adam(W) with the same hyperparameter settings.      
 
 <img src="https://github.com/lixilinx/psgd_torch/blob/master/misc/vit_adam_vs_psgd.svg" width=70% height=70%>
 
-The inverse-free versions of PSGD also work well with half precision. Please check this [GPT2](https://github.com/lixilinx/psgd_torch/blob/master/misc/gpt2.py) example for reproducing the following results.
+For very sparse gradients, PSGD prefers whitening the momentum, and this [GPT2](https://github.com/lixilinx/psgd_torch/blob/master/misc/gpt2.py) example shows that PSGD can outperform Adam(W) again with virtually the same hyperparameter settings (needs to reduce lr_params by $\sqrt{(1 + \beta)/(1 - \beta)}$ times to match with Adam(W)'s lr). 
 
 <img src="https://github.com/lixilinx/psgd_torch/blob/master/misc/gpt2_adamw_vs_psgd.svg" width=70% height=70%>
 
