@@ -146,18 +146,18 @@ def procrustes_step(Q, max_step_size=1/8):
     However, O(n) is not connected. Hence, such SO(n) rotations can only make real Q with det(Q) > 0 SPD. 
     """
     R = Q.H - Q 
-    max_abs = R.abs().amax()
-    if max_abs > torch.finfo(max_abs.dtype).smallest_normal: # to avoid inf due to 1/subnormal or 1/0
-        R /= max_abs # normalize R as typically it's too small 
+    norm_R = norm_lower_bound_skh(R)
+    if norm_R > torch.finfo(norm_R.dtype).smallest_normal: # to avoid inf due to 1/subnormal or 1/0
+        R /= norm_R # normalize R as typically it's too small 
         RQ = R @ Q
-        tr_RQ = RQ.diagonal().real.sum() # torch.trace not implemented for bfloat16, so sum(diag())  
+        tr_RQ = RQ.diagonal().real.sum() # torch.trace not implemented for CPU bfloat16, so sum(diag())  
         if tr_RQ > 0: # otherwise tr_RQ = 0 and thus Q is already Hermitian  
-            # rotate Q as exp(a R) Q ~ (I + a R + a^2 R^2/2) Q with an optimal a
-            a = max_step_size / norm_lower_bound_skh(R)
+            # rotate Q as exp(a R) Q ~ (I + a R + a^2 R^2/2) Q with an optimal step size a by line search
+            a = max_step_size
             RRQ = R @ RQ
             tr_RRQ = RRQ.diagonal().real.sum() 
             if tr_RRQ < 0: # the max step size could over-shoot in this case 
-                a = min(a, -tr_RQ / tr_RRQ) 
+                a = min(a, -tr_RQ / tr_RRQ)  
             Q.add_(a * (RQ + 0.5 * a * RRQ))
 
 
