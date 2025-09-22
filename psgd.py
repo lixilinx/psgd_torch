@@ -55,7 +55,8 @@ def norm_lower_bound_spd(A, k=4, iters=5):
 
         # simplified implementation 
         j = torch.argmax(torch.linalg.vector_norm(A, dim=1))
-        V = (A[j] + torch.randn(k, A.shape[1], dtype=A.dtype, device=A.device)) @ A
+        V = torch.randn(k, A.shape[1], dtype=A.dtype, device=A.device)
+        V = A[j] + torch.sgn(torch.sum(A[j] * V.conj(), dim=1, keepdim=True)) * V # torch.sign for real 
         for _ in range(iters):
             V /= V.abs().amax()
             V = V @ A   
@@ -100,7 +101,8 @@ def norm_lower_bound_skh(A, k=4, iters=5):
 
         # simplified implementation 
         j = torch.argmax(torch.linalg.vector_norm(A, dim=1))
-        V = (A[j] + torch.randn(k, A.shape[1], dtype=A.dtype, device=A.device)) @ A
+        V = torch.randn(k, A.shape[1], dtype=A.dtype, device=A.device)
+        V = A[j] + torch.sgn(torch.sum(A[j] * V.conj(), dim=1, keepdim=True)) * V # torch.sign for real 
         for _ in range(iters):
             V /= V.abs().amax()
             V = V @ A   
