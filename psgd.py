@@ -45,44 +45,23 @@ def norm_lower_bound_spd(A, k=4, iters=5):
     where k is the dim of subspace, and iters is the number of subspace iterations. 
     A rough norm estimation is good, and we don't orthonormaliz the subspace vectors. 
 
-    The initial noise vectors V are rotated such that its centroid aligns with the largest row of A. 
+    The initial noise space V is rotated such that its centroid aligns with the largest row of A. 
     Hence, each row of V and the largest row of A has an angle about acos(1/sqrt(k)) when k << dim(A). 
     This feature makes the subspace iteration more robust. 
+
+    A simplified branchless implementation is provided to make compiling easier. Recommend iters >= 2.  
     """
-    max_abs = A.diagonal().real.amax() # used to normalize A to avoid numerical under/over-flow
-    if max_abs > torch.finfo(max_abs.dtype).smallest_normal: 
-        A = A/max_abs 
-
-        # simplified implementation 
-        j = torch.argmax(torch.linalg.vector_norm(A, dim=1))
-        V = torch.randn(k, A.shape[1], dtype=A.dtype, device=A.device)
-        V = A[j] + torch.sgn(torch.sum(A[j] * V.conj(), dim=1, keepdim=True)) * V # torch.sign for real 
-        for _ in range(iters):
-            V /= V.abs().amax()
-            V = V @ A   
-        V /= torch.linalg.vector_norm(V, dim=1, keepdim=True) + 1e-9
-        return max_abs * torch.amax(torch.linalg.vector_norm(V @ A, dim=1))
-
-        # # the exact implementation 
-        # norm_a, j = torch.max(torch.linalg.vector_norm(A, dim=1), 0)
-        # a = A[j] # a is the largest row of A
-        # V = torch.randn(k, A.shape[1], dtype=A.dtype, device=A.device)    
-        # c = torch.mean(V, dim=0) # c is the centroid of V
-        # u = norm_a * c + torch.linalg.vector_norm(c) * torch.sgn(torch.sum(c * a.conj())) * a 
-        # u /= torch.linalg.vector_norm(u) # u is the Householder reflection vector
-        # V -= 2 * torch.sum(u.conj() * V, dim=1, keepdim=True) * u # now centroid of V aligns with a
-        # for _ in range(iters):
-        #     V /= V.abs().amax()
-        #     V = V @ A   
-        # V /= torch.linalg.vector_norm(V, dim=1, keepdim=True)
-        # norm_A = max_abs * torch.amax(torch.linalg.vector_norm(V @ A, dim=1))
-        # if torch.isfinite(norm_A):
-        #     return norm_A
-        # else: # happens with a negligible but nonzero probability for small dim(A) 
-        #     print("Subspace iteration failed. Try again.")
-        #     return norm_lower_bound_spd(A, k=k, iters=iters)
-    else: # norm(A) is too small 
-        return max_abs 
+    smallest_normal = torch.finfo(A.dtype).smallest_normal
+    normalizing_factor = A.diagonal().real.amax() + smallest_normal
+    A = A / normalizing_factor # (complex tensor) / (subnormal number) could produce inf or nan unexpectedly  
+    j = torch.argmax(torch.linalg.vector_norm(A, dim=1))
+    V = torch.randn(k, A.shape[1], dtype=A.dtype, device=A.device)
+    V = A[j] + torch.sgn(torch.sum(A[j] * V.conj(), dim=1, keepdim=True)) * V # torch.sign for real 
+    for _ in range(iters):
+        V /= V.abs().amax() + smallest_normal
+        V = V @ A   
+    V /= torch.linalg.vector_norm(V, dim=1, keepdim=True) + smallest_normal
+    return normalizing_factor * torch.amax(torch.linalg.vector_norm(V @ A, dim=1))
 
 
 def norm_lower_bound_skh(A, k=4, iters=5):
@@ -91,44 +70,23 @@ def norm_lower_bound_skh(A, k=4, iters=5):
     where k is the dim of subspace, and iters is the number of subspace iterations. 
     A rough norm estimation is good, and we don't orthonormaliz the subspace vectors. 
 
-    The initial noise vectors V are rotated such that its centroid aligns with the largest row of A. 
+    The initial noise space V is rotated such that its centroid aligns with the largest row of A. 
     Hence, each row of V and the largest row of A has an angle about acos(1/sqrt(k)) when k << dim(A). 
     This feature makes the subspace iteration more robust. 
-    """
-    max_abs = A.abs().amax() # used to normalize A to avoid numerical under/over-flow
-    if max_abs > torch.finfo(max_abs.dtype).smallest_normal:
-        A = A/max_abs
 
-        # simplified implementation 
-        j = torch.argmax(torch.linalg.vector_norm(A, dim=1))
-        V = torch.randn(k, A.shape[1], dtype=A.dtype, device=A.device)
-        V = A[j] + torch.sgn(torch.sum(A[j] * V.conj(), dim=1, keepdim=True)) * V # torch.sign for real 
-        for _ in range(iters):
-            V /= V.abs().amax()
-            V = V @ A   
-        V /= torch.linalg.vector_norm(V, dim=1, keepdim=True) + 1e-9
-        return max_abs * torch.amax(torch.linalg.vector_norm(V @ A, dim=1))
-    
-        # # the exact implementation 
-        # norm_a, j = torch.max(torch.linalg.vector_norm(A, dim=1), 0)
-        # a = A[j] # a is the largest row of A
-        # V = torch.randn(k, A.shape[1], dtype=A.dtype, device=A.device)  
-        # c = torch.mean(V, dim=0) # the centroid of V
-        # u = norm_a * c + torch.linalg.vector_norm(c) * torch.sgn(torch.sum(c * a.conj())) * a 
-        # u /= torch.linalg.vector_norm(u) # u is the Householder reflection vector
-        # V -= 2 * torch.sum(u.conj() * V, dim=1, keepdim=True) * u # now centroid of V aligns with a
-        # for _ in range(iters):
-        #     V /= V.abs().amax()
-        #     V = V @ A   
-        # V /= torch.linalg.vector_norm(V, dim=1, keepdim=True)
-        # norm_A = max_abs * torch.amax(torch.linalg.vector_norm(V @ A, dim=1))
-        # if torch.isfinite(norm_A):
-        #     return norm_A
-        # else: # happens with a negligible but nonzero probability for small dim(A)
-        #     print("Subspace iteration failed. Try again.")
-        #     return norm_lower_bound_skh(A, k=k, iters=iters)
-    else: # norm(A) is too small  
-        return max_abs 
+    A simplified branchless implementation is provided to make compiling easier. Recommend iters >= 2.
+    """
+    smallest_normal = torch.finfo(A.dtype).smallest_normal
+    normalizing_factor = A.abs().amax() + smallest_normal
+    A = A / normalizing_factor # (complex tensor) / (subnormal number) could produce inf or nan unexpectedly   
+    j = torch.argmax(torch.linalg.vector_norm(A, dim=1))
+    V = torch.randn(k, A.shape[1], dtype=A.dtype, device=A.device)
+    V = A[j] + torch.sgn(torch.sum(A[j] * V.conj(), dim=1, keepdim=True)) * V # torch.sign for real 
+    for _ in range(iters):
+        V /= V.abs().amax() + smallest_normal
+        V = V @ A   
+    V /= torch.linalg.vector_norm(V, dim=1, keepdim=True) + smallest_normal
+    return normalizing_factor * torch.amax(torch.linalg.vector_norm(V @ A, dim=1))
     
 
 def lift2single(x):
@@ -146,21 +104,20 @@ def procrustes_step(Q, max_step_size=1/8):
 
     Note that U(n) is connected and such rotations can make most complex Q SPD except for convergence to saddle points. 
     However, O(n) is not connected. Hence, such SO(n) rotations can only make real Q with det(Q) > 0 SPD. 
+
+    We have simplified the original implementation. The one branch here is necessary for line search.  
     """
     R = Q.H - Q 
-    norm_R = norm_lower_bound_skh(R)
-    if norm_R > torch.finfo(norm_R.dtype).smallest_normal: # to avoid inf due to 1/subnormal or 1/0
-        R /= norm_R # normalize R as typically it's too small 
-        RQ = R @ Q
-        tr_RQ = RQ.diagonal().real.sum() # torch.trace not implemented for CPU bfloat16, so sum(diag())  
-        if tr_RQ > 0: # otherwise tr_RQ = 0 and thus Q is already Hermitian  
-            # rotate Q as exp(a R) Q ~ (I + a R + a^2 R^2/2) Q with an optimal step size a by line search
-            a = max_step_size
-            RRQ = R @ RQ
-            tr_RRQ = RRQ.diagonal().real.sum() 
-            if tr_RRQ < 0: # the max step size could over-shoot in this case 
-                a = min(a, -tr_RQ / tr_RRQ)  
-            Q.add_(a * (RQ + 0.5 * a * RRQ))
+    normalizing_factor = norm_lower_bound_skh(R) + torch.finfo(R.dtype).smallest_normal
+    R /= normalizing_factor # normalize R as typically it's too small 
+    RQ = R @ Q
+    RRQ = R @ RQ
+    a = max_step_size
+    tr_RRQ = RRQ.diagonal().real.sum() # torch.trace not implemented for CPU bfloat16, so sum(diag())  
+    if tr_RRQ < 0: # the max step size could over-shoot in this case; turn to line search  
+        tr_RQ = RQ.diagonal().real.sum()                # tr_RQ >=0 by theory  
+        a = torch.clamp(-tr_RQ / tr_RRQ, min=0, max=a)  # so clamp to 0 here
+    Q.add_(a * (RQ + 0.5 * a * RRQ))
 
 
 #############       Begin of PSGD Kronecker product preconditioners       #############         
@@ -316,11 +273,11 @@ def update_precond_kron_eq(QL, exprs, V, Hvp, lr=0.1, betaL=0.9):
                    
         if q.dim() < 2: # q is a diagonal matrix or scalar preconditioner
             ell = torch.max(torch.real(term1 + term2))
-            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             q.sub_(lr/L[i] * (term1 - term2) * q) # q.mul_(1 - lr/L[i] * (term1 - term2)): larger roundoff errors       
         else: # q is a matrix preconditioner 
             ell = norm_lower_bound_spd(term1 + term2)
-            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             q.sub_(lr/L[i] * torch.triu(term1 - term2) @ q)
 
     if torch.rand([]) < 0.01: # balance factors of Q
@@ -361,12 +318,12 @@ def update_precond_kron_whiten_qep(QL, exprs, G, lr=0.1, betaL=0.9, damping=1e-9
         if q.dim() < 2: # diagonal or scalar Q 
             term2 = total_numel/q.numel() * q * q.conj()
             ell = torch.max(torch.real(term1 + term2)) 
-            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             q.mul_(1 - lr/L[i] * (term1 - term2))
         else: # matrix Q
             term2 = total_numel/q.shape[0] * q @ q.H
             ell = norm_lower_bound_spd(term1 + term2)
-            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             q.sub_(lr/L[i] * (term1 - term2) @ q)
 
 
@@ -384,12 +341,12 @@ def update_precond_kron_whiten_qeq(QL, exprs, G, lr=0.1, betaL=0.9, damping=1e-9
         if q.dim() < 2: # diagonal or scalar Q 
             term2 = total_numel/q.numel() # times I
             ell = torch.max(torch.real(term1)) + term2 
-            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             q.mul_(1 - lr/L[i] * (term1 - term2))
         else: # matrix Q
             term2 = total_numel/q.shape[0] # times I
             ell = norm_lower_bound_spd(term1) + term2
-            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             q.sub_(lr/L[i] * (q @ term1 - q * term2))
             
     if torch.rand([]) < 0.01: # balance factors of Q
@@ -410,12 +367,12 @@ def update_precond_kron_whiten_q0p5eq1p5(QL, exprs, G, lr=0.1, betaL=0.9, dampin
         if q.dim() < 2: # diagonal or scalar Q 
             term2 = total_numel/q.numel() # times I
             ell = torch.max(torch.real(term1)) + term2  
-            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             q.mul_(1 - lr/L[i] * (term1 - term2))
         else: # matrix Q
             term2 = total_numel/q.shape[0] # times I
             ell = norm_lower_bound_spd(term1) + term2
-            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             q.sub_(lr/L[i] * (term1 @ q - term2 * q))
             procrustes_step(q)
             
@@ -437,16 +394,16 @@ def update_precond_kron_whiten_quad(QL, exprs, G, lr=0.1, betaL=0.9, damping=1e-
         if q.dim() < 2: # diagonal or scalar Q 
             term2 = total_numel/q.numel() # times I
             ell = torch.max(torch.real(term1)) + term2 
-            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             gain = 1 - lr/2/L[i] * (term1 - term2)
             q.mul_(gain * gain) 
         else: # matrix Q
             term2 = total_numel/q.shape[0] # times I
             ell = norm_lower_bound_spd(term1) + term2
-            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             p = q - lr/2/L[i] * (term1 @ q - term2 * q) 
             p = p - lr/2/L[i] * (p @ term1 - p * term2) 
-            q.data = (p + p.H)/2 # p must be symmetric/hermitian  
+            q.copy_((p + p.H)/2) # p must be symmetric/hermitian  
             
     if torch.rand([]) < 0.01: # balance factors of Q
         balance_kron_precond(Q)
@@ -467,16 +424,16 @@ def update_precond_kron_whiten_quad4p(QL, exprs, G, lr=0.1, betaL=0.9, damping=1
         if q.dim() < 2: # diagonal or scalar Q 
             term2 = total_numel/q.numel() # times I
             ell = torch.max(torch.real(term1)) + term2 
-            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             gain = 1 - lr/L[i] * (term1 - term2)
             q.mul_(gain * gain) 
         else: # matrix Q
             term2 = total_numel/q.shape[0] # times I
             ell = norm_lower_bound_spd(term1) + term2
-            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             p = q - lr/L[i] * (term1 @ q - term2 * q) 
             p = p - lr/L[i] * (p @ term1 - p * term2) 
-            q.data = (p + p.H)/2 # p must be symmetric/hermitian  
+            q.copy_((p + p.H)/2) # p must be symmetric/hermitian  
             
     if torch.rand([]) < 0.01: # balance factors of Q
         balance_kron_precond(Q)
@@ -626,11 +583,11 @@ def update_precond_kron_newton_qep(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, damping
         term2 = exprGs[i](Qv, Qv.conj())
         if q.dim() < 2: # diagonal or scalar Q 
             ell = torch.max(torch.real(term1 + term2)) 
-            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             q.mul_(1 - lr/L[i] * (term1 - term2))
         else: # matrix Q
             ell = norm_lower_bound_spd(term1 + term2) 
-            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             q.sub_(lr/L[i] * (term1 - term2) @ q)
 
 
@@ -647,11 +604,11 @@ def update_precond_kron_newton_qeq(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, damping
         term2 = exprGs[i](V, V.conj())
         if q.dim() < 2: # diagonal or scalar Q 
             ell = torch.max(torch.real(term1 + term2)) 
-            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             q.mul_(1 - lr/L[i] * (term1 - term2))
         else: # matrix Q
             ell = norm_lower_bound_spd(term1 + term2) 
-            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             q.sub_(lr/L[i] * q @ (term1 - term2))
     
     if torch.rand([]) < 0.01: # balance factors of Q
@@ -671,11 +628,11 @@ def update_precond_kron_newton_q0p5eq1p5(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, d
         term2 = exprGs[i](V, V.conj())
         if q.dim() < 2: # diagonal or scalar Q 
             ell = torch.max(torch.real(term1 + term2)) 
-            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             q.mul_(1 - lr/L[i] * (term1 - term2))
         else: # matrix Q
             ell = norm_lower_bound_spd(term1 + term2) 
-            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             q.sub_(lr/L[i] * (term1 - term2) @ q)
             procrustes_step(q)
     
@@ -696,16 +653,16 @@ def update_precond_kron_newton_quad(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, dampin
         term2 = exprGs[i](V, V.conj())
         if q.dim() < 2: # diagonal or scalar Q 
             ell = torch.max(torch.real(term1 + term2)) 
-            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             gain = 1 - lr/2/L[i] * (term1 - term2)
             q.mul_(gain * gain)
         else: # matrix Q
             ell = norm_lower_bound_spd(term1 + term2) 
-            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             err = lr/2/L[i] * (term1 - term2)
             p = q - err @ q     # p = q - lr/L[i]/2 * (term1 - term2) @ q
             p = p - p @ err     # p = p - lr/L[i]/2 * p @ (term1 - term2)
-            q.data = (p + p.H)/2 # p must be symmetric or hermitian  
+            q.copy_((p + p.H)/2) # p must be symmetric or hermitian  
     
     if torch.rand([]) < 0.01: # balance factors of Q
         balance_kron_precond(Q)
@@ -725,16 +682,16 @@ def update_precond_kron_newton_quad4p(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, damp
         term2 = exprGs[i](V, V.conj())
         if q.dim() < 2: # diagonal or scalar Q 
             ell = torch.max(torch.real(term1 + term2)) 
-            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             gain = 1 - lr/L[i] * (term1 - term2)
             q.mul_(gain * gain)
         else: # matrix Q
             ell = norm_lower_bound_spd(term1 + term2) 
-            L[i].data = torch.max(betaL*L[i] + (1 - betaL)*ell, ell)
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             err = lr/L[i] * (term1 - term2)
             p = q - err @ q     # p = q - lr/L[i] * (term1 - term2) @ q
             p = p - p @ err     # p = p - lr/L[i] * p @ (term1 - term2)
-            q.data = (p + p.H)/2 # p must be symmetric or hermitian  
+            q.copy_((p + p.H)/2) # p must be symmetric or hermitian  
     
     if torch.rand([]) < 0.01: # balance factors of Q
         balance_kron_precond(Q)
@@ -928,7 +885,7 @@ def update_precond_lra(UVd, Luvd, v, h, lr=0.1, betaL=0.9):
     # update d 
     Phh, vinvPv = Ph*h, v*invPv
     ell = torch.max(torch.abs(Phh)) + torch.max(torch.abs(vinvPv))
-    Ld.data = torch.max(betaL*Ld + (1 - betaL)*ell, ell)
+    Ld.copy_(torch.max(betaL*Ld + (1 - betaL)*ell, ell))
     d.sub_(lr/Ld*(Phh - vinvPv)*d)  # d.mul_(1 - lr/Ld*(Phh - vinvPv)): larger roundoff errors, unstable with bfloat16 and lr<<1 
 
     a, b = Qh, invQtv        
@@ -939,7 +896,7 @@ def update_precond_lra(UVd, Luvd, v, h, lr=0.1, betaL=0.9):
         btVVt = btV.mm(V.t())
         ell = (torch.linalg.vector_norm(a)*torch.linalg.vector_norm(atVVt) + 
                torch.linalg.vector_norm(b)*torch.linalg.vector_norm(btVVt))
-        Lu.data = torch.max(betaL*Lu + (1 - betaL)*ell, ell)
+        Lu.copy_(torch.max(betaL*Lu + (1 - betaL)*ell, ell))
         U.sub_(lr/Lu * ( a.mm(atV.mm(IpVtU)) - b.mm(btV.mm(IpVtU)) ))
     else: # only udate V
         atU = a.t().mm(U)
@@ -948,7 +905,7 @@ def update_precond_lra(UVd, Luvd, v, h, lr=0.1, betaL=0.9):
         UUtb = U.mm(btU.t())
         ell = (torch.linalg.vector_norm(a)*torch.linalg.vector_norm(UUta) + 
                torch.linalg.vector_norm(b)*torch.linalg.vector_norm(UUtb))
-        Lv.data = torch.max(betaL*Lv + (1 - betaL)*ell, ell)
+        Lv.copy_(torch.max(betaL*Lv + (1 - betaL)*ell, ell))
         V.sub_(lr/Lv * ( (a + V.mm(atU.t())).mm(atU) - (b + V.mm(btU.t())).mm(btU) ))
 
 
@@ -1227,7 +1184,7 @@ def update_precond_dense_eq(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
     a = Q.mm(h + damping*torch.randn_like(h))
     b = torch.linalg.solve_triangular(lift2single(Q.t()), lift2single(v), upper=False).to(v.dtype)
     ell = torch.sum(a*a + b*b)
-    L.data = torch.max(betaL*L + (1 - betaL)*ell, ell)
+    L.copy_(torch.max(betaL*L + (1 - betaL)*ell, ell))
     Q.sub_(lr/L * torch.triu(a.mm(a.t()) - b.mm(b.t())) @ Q)
 
 
@@ -1238,7 +1195,7 @@ def update_precond_dense_qep(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
     a = Q @ (Q.T @ (Q @ (h + damping*torch.randn_like(h))))
     b = Q @ v
     ell = torch.sum(a*a + b*b)
-    L.data = torch.max(betaL*L + (1 - betaL)*ell, ell)
+    L.copy_(torch.max(betaL*L + (1 - betaL)*ell, ell))
     Q.sub_(lr/L * (a @ (a.T @ Q) - b @ (b.T @ Q)))
 
 
@@ -1248,7 +1205,7 @@ def update_precond_dense_qeq(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
     """
     a = Q.T @ (Q @ (h + damping*torch.randn_like(h)))
     ell = torch.sum(a*a + v*v)
-    L.data = torch.max(betaL*L + (1 - betaL)*ell, ell)
+    L.copy_(torch.max(betaL*L + (1 - betaL)*ell, ell))
     Q.sub_(lr/L * ((Q @ a) @ a.T - (Q @ v) @ v.T))
 
 
@@ -1258,7 +1215,7 @@ def update_precond_dense_q0p5eq1p5(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
     """
     a = Q.T @ (Q @ (h + damping*torch.randn_like(h)))
     ell = torch.sum(a*a + v*v)
-    L.data = torch.max(betaL*L + (1 - betaL)*ell, ell)
+    L.copy_(torch.max(betaL*L + (1 - betaL)*ell, ell))
     Q.sub_(lr/L * (a @ (a.T @ Q) - v @ (v.T @ Q)))
     procrustes_step(Q)
 
@@ -1269,10 +1226,10 @@ def update_precond_dense_quad(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
     """
     a = Q @ (Q @ (h + damping*torch.randn_like(h))) # Q is symmetric here 
     ell = torch.sum(a*a + v*v)
-    L.data = torch.max(betaL*L + (1 - betaL)*ell, ell)
+    L.copy_(torch.max(betaL*L + (1 - betaL)*ell, ell))
     p = Q - lr/2/L * (a @ (a.T @ Q) - v @ (v.T @ Q)) 
     p = p - lr/2/L * ((p @ a) @ a.T - (p @ v) @ v.T) 
-    Q.data = (p + p.T)/2 
+    Q.copy_((p + p.T)/2) 
 
 
 def update_precond_dense_quad4p(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
@@ -1281,10 +1238,10 @@ def update_precond_dense_quad4p(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
     """
     a = Q @ (h + damping*torch.randn_like(h)) # Q actually is P; so just apply it once. 
     ell = torch.sum(a*a + v*v)
-    L.data = torch.max(betaL*L + (1 - betaL)*ell, ell)
+    L.copy_(torch.max(betaL*L + (1 - betaL)*ell, ell))
     p = Q - lr/L * (a @ (a.T @ Q) - v @ (v.T @ Q)) 
     p = p - lr/L * ((p @ a) @ a.T - (p @ v) @ v.T) 
-    Q.data = (p + p.T)/2 
+    Q.copy_((p + p.T)/2) 
 
 
 class DenseNewton:
