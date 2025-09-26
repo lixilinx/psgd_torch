@@ -39,17 +39,17 @@ import opt_einsum
 import torch
 
 
-def norm_lower_bound_spd(A, k=4, iters=5):
+def norm_lower_bound_spd(A, k=32, half_iters=2):
     """
-    Returns a cheap lower bound for the spectral norm of a symmetric positive definite matrix A, 
-    where k is the dim of subspace, and iters is the number of subspace iterations. 
+    Returns a cheap lower bound for the spectral norm of a symmetric positive definite matrix A, where,
+        k: the dim of subspace, suggesting 128 for bfloat16, 32 for float32 and 4 for float64 (tested on my laptop 4070 GPU);
+        half_iters: half of the number of subspace iterations, suggesting 2.  
     A rough norm estimation is good, and we don't orthonormaliz the subspace vectors. 
 
     The initial noise space V is rotated such that its centroid aligns with the largest row of A. 
     Hence, each row of V and the largest row of A has an angle about acos(1/sqrt(k)) when k << dim(A). 
-    This feature makes the subspace iteration more robust. 
-
-    A simplified branchless implementation is provided to make compiling easier. Recommend iters >= 2.  
+    This feature makes the subspace iteration more robust for large matrices with very low rank. 
+    A simplified branchless approximate implementation is provided here.   
     """
     smallest_normal = torch.finfo(A.dtype).smallest_normal
     normalizing_factor = A.diagonal().real.amax() + smallest_normal
@@ -57,36 +57,36 @@ def norm_lower_bound_spd(A, k=4, iters=5):
     j = torch.argmax(torch.linalg.vector_norm(A, dim=1))
     V = torch.randn(k, A.shape[1], dtype=A.dtype, device=A.device)
     V = A[j] + torch.sgn(torch.sum(A[j] * V.conj(), dim=1, keepdim=True)) * V # torch.sign for real 
-    for _ in range(iters):
-        V /= V.abs().amax() + smallest_normal
+    for _ in range(half_iters):
+        V = V @ A 
+        V /= torch.linalg.vector_norm(V, dim=1, keepdim=True) + smallest_normal
         V = V @ A   
-    V /= torch.linalg.vector_norm(V, dim=1, keepdim=True) + smallest_normal
-    return normalizing_factor * torch.amax(torch.linalg.vector_norm(V @ A, dim=1))
+    return normalizing_factor * torch.amax(torch.linalg.vector_norm(V, dim=1))
 
 
-def norm_lower_bound_skh(A, k=4, iters=5):
+def norm_lower_bound_skh(A, k=32, half_iters=2):
     """
     Returns a cheap lower bound for the spectral norm of a skew-Hermitian matrix A,
-    where k is the dim of subspace, and iters is the number of subspace iterations. 
+        k: the dim of subspace, suggesting 128 for bfloat16, 32 for float32 and 4 for float64 (tested on my laptop 4070 GPU);
+        half_iters: half of the number of subspace iterations, suggesting 2.  
     A rough norm estimation is good, and we don't orthonormaliz the subspace vectors. 
 
     The initial noise space V is rotated such that its centroid aligns with the largest row of A. 
     Hence, each row of V and the largest row of A has an angle about acos(1/sqrt(k)) when k << dim(A). 
-    This feature makes the subspace iteration more robust. 
-
-    A simplified branchless implementation is provided to make compiling easier. Recommend iters >= 2.
+    This feature makes the subspace iteration more robust for large matrices with very low rank. 
+    A simplified branchless approximate implementation is provided here.  
     """
     smallest_normal = torch.finfo(A.dtype).smallest_normal
     normalizing_factor = A.abs().amax() + smallest_normal
-    A = A / normalizing_factor # (complex tensor) / (subnormal number) could produce inf or nan unexpectedly   
+    A = A / normalizing_factor # (complex tensor) / (subnormal number) could produce inf or nan unexpectedly  
     j = torch.argmax(torch.linalg.vector_norm(A, dim=1))
     V = torch.randn(k, A.shape[1], dtype=A.dtype, device=A.device)
     V = A[j] + torch.sgn(torch.sum(A[j] * V.conj(), dim=1, keepdim=True)) * V # torch.sign for real 
-    for _ in range(iters):
-        V /= V.abs().amax() + smallest_normal
+    for _ in range(half_iters):
+        V = V @ A 
+        V /= torch.linalg.vector_norm(V, dim=1, keepdim=True) + smallest_normal
         V = V @ A   
-    V /= torch.linalg.vector_norm(V, dim=1, keepdim=True) + smallest_normal
-    return normalizing_factor * torch.amax(torch.linalg.vector_norm(V @ A, dim=1))
+    return normalizing_factor * torch.amax(torch.linalg.vector_norm(V, dim=1))
     
 
 def lift2single(x):
@@ -108,15 +108,12 @@ def procrustes_step(Q, max_step_size=1/8):
     We have simplified the original implementation. The one branch here is necessary for line search.  
     """
     R = Q.H - Q 
-    normalizing_factor = norm_lower_bound_skh(R) + torch.finfo(R.dtype).smallest_normal
-    R /= normalizing_factor # normalize R as typically it's too small 
+    R /= norm_lower_bound_skh(R) + torch.finfo(R.dtype).smallest_normal # normalize R as typically it's too small 
     RQ = R @ Q
     RRQ = R @ RQ
-    a = max_step_size
-    tr_RRQ = RRQ.diagonal().real.sum() # torch.trace not implemented for CPU bfloat16, so sum(diag())  
-    if tr_RRQ < 0: # the max step size could over-shoot in this case; turn to line search  
-        tr_RQ = RQ.diagonal().real.sum()                # tr_RQ >=0 by theory  
-        a = torch.clamp(-tr_RQ / tr_RRQ, min=0, max=a)  # so clamp to 0 here
+    tr_RQ = RQ.diagonal().real.sum() # tr_RQ >=0 by theory; torch.trace not implemented for CPU bfloat16, so sum(diag())
+    tr_RRQ = RRQ.diagonal().real.sum() # line search is needed if tr_RRQ < 0
+    a = torch.where(tr_RRQ < 0, torch.clamp(-tr_RQ / tr_RRQ, min=0, max=max_step_size), max_step_size)
     Q.add_(a * (RQ + 0.5 * a * RRQ))
 
 
