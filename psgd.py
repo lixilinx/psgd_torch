@@ -2,36 +2,35 @@
 The new PSGD-Kron Newton/Whitening preconditioners support five kinds of local coordinates for updating Q: 
 
     QUAD): It's a specific form for updating Q to ensure that Q > 0 (thus Q is symmetric/Hermitian).   
-    This is one of the recommended choices for fitting Q. 
+    It still is numerically stable even if round-off errors break the SPD property of Q. 
 
-    QEQ):    dQ = Q * mathcal{E} * Q
+    QEQ): dQ = Q * mathcal{E} * Q
     This leads to another simple way for updating Q (Q is in the general linear group).
-    It's another recommended choice for fitting Q.  
 
-    Q0p5EQ1p5): dQ = Q^0.5 * mathcal{E} * Q^1.5
-    One more recommended choice for fitting Q. 
-    An online orthogonal Procrustes problem solver is used to keep Q approximately SPD.  
+    Q0.5EQ1.5/Q0p5EQ1p5): dQ = Q^0.5 * mathcal{E} * Q^1.5
+    The default and recommended choice for fitting Q. 
+    An online orthogonal Procrustes problem solver is used to keep Q approximately SPD (no need to be exactly SPD).  
 
-    EQ):    dQ = mathcal{E} * Q
+    EQ): dQ = mathcal{E} * Q
     This choice recovers the old PSGD way for updating Q in Lie groups (Q is triangular). 
     Its main drawback is that triangualr solvers are required for updating Q.  
 
-    QEP):   dQ = Q * mathcal{E} * P
+    QEP): dQ = Q * mathcal{E} * P
     This last choice works very well if it does. Q is in the general linear group.  
     But, one drawback is that Q might get stuck around ill-conditioned matrices (not strongly convex). 
 
-The QUAD formulae can be used to update P directly (see older commit 0fc33cd). 
-I call this choice QUAD4P. It still is a good choice for optimization with single precision. 
-Unlike QUAD, QUAD4P does not work well with half precision. Use it with caution.  
+Both the QUAD and Q0.5EQ1.5 methods can be used to update P directly with little changes. 
+We call them QUAD4P and P0.5EP1.5/P0p5EP1p5, respectively. 
+P0.5EP1.5/P0p5EP1p5 still is a competitive choice most of the time.  
 
 The PSGD-LRA Newton/Whitening preconditioners still adopt local coordinate dQ = mathcal{E} * Q, 
 and needs a small linear solver to update the preconditioner.
 
-I also keep the PSGD dense matrix Newton-type preconditioner here to illustrate the math. 
+We also keep the PSGD dense matrix Newton-type preconditioner here to illustrate the math. 
 It supports all the five methods for updating Q, 
 and can be a good alternative to the BFGS like quasi-Newton optimizers as no line search is required. 
 
-Xi-Lin Li, lixilinx@gmail.com; last updated in Sept., 2025. 
+Xi-Lin Li, lixilinx@gmail.com; last updated in Oct., 2025. 
 Main refs: https://arxiv.org/abs/1512.04202; https://arxiv.org/abs/2402.11858. 
 """
 
@@ -102,7 +101,7 @@ def procrustes_step(Q, max_step_size=1/8):
 
     Do not set max_step_size > 1/4 as we only expand exp(a R) to its 2nd term. 
 
-    Note that U(n) is connected and such rotations can make most complex Q SPD except for convergence to saddle points. 
+    Note that U(n) is connected and such rotations can make almost any complex Q SPD except for convergence to saddle points. 
     However, O(n) is not connected. Hence, such SO(n) rotations can only make real Q with det(Q) > 0 SPD. 
 
     We have simplified the original implementation. The one branch here is necessary for line search.  
@@ -120,7 +119,7 @@ def procrustes_step(Q, max_step_size=1/8):
 #############       Begin of PSGD Kronecker product preconditioners       #############         
 
 
-def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QEQ"):
+def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="Q0.5EQ1.5"):
     """
     For a scalar or tensor t, we initialize its states (preconditioner Q and Lipschitz smoothness constant L), 
     and reusable contraction expressions for updating Q and preconditioning gradient.
@@ -145,7 +144,7 @@ def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QEQ"):
 
         Please check https://drive.google.com/file/d/1CEEq7A3_l8EcPEDa_sYtqr5aMLVeZWL7/view?usp=drive_link for notations and derivations. 
     """
-    if dQ == "QUAD4P": # the only case that we fit P directly; so square Scale 
+    if dQ in {"QUAD4P", "P0.5EP1.5", "P0p5EP1p5"}: # the only two cases that we fit P directly; so square Scale 
         Scale = Scale ** 2 
     shape = t.shape 
     if len(shape)==0: # scalar 
@@ -218,10 +217,10 @@ def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="QEQ"):
         return [[Q, L], (exprP, exprGs, exprQs)]
     elif dQ == "EQ": 
         return [[Q, L], (exprP, exprGs, exprA)]
-    elif (dQ == "QEQ") or (dQ == "QUAD") or (dQ == "Q0p5EQ1p5") or (dQ == "Q0.5EQ1.5"):
+    elif dQ in {"QEQ", "QUAD", "Q0p5EQ1p5", "Q0.5EQ1.5"}:
         return [[Q, L], (exprP, exprGs)]
-    else: # the only case that we fit P directly 
-        assert dQ == "QUAD4P", "Invalid choice for dQ" 
+    else: # the only two cases that we fit P directly; dQ actually is dP 
+        assert dQ in {"QUAD4P", "P0.5EP1.5", "P0p5EP1p5"}, "Invalid choice for dQ" 
         return [[Q, L], (exprA, exprGs)]
 
 
@@ -377,6 +376,39 @@ def update_precond_kron_whiten_q0p5eq1p5(QL, exprs, G, lr=0.1, betaL=0.9, dampin
         balance_kron_precond(Q)
 
 
+def update_precond_kron_whiten_p0p5ep1p5(QL, exprs, G, lr=0.1, betaL=0.9, damping=1e-9):
+    """
+    Update the Kron preconditioner P as dP = P^0.5 * E * P^1.5. 
+    Almost the same as update_precond_kron_whiten_q0p5eq1p5. But the Q here actually is P. 
+    Unlike fitting Q, fitting P directly is more sensitive to numerical round-off errors. 
+    """   
+    Q, L = QL
+    exprA, exprGs = exprs
+    
+    total_numel = G.numel() 
+    damping = damping + torch.finfo(G.dtype).resolution * G.abs().mean()  
+    Pg = exprA(*Q, G + damping*torch.randn_like(G)) # Q actually is P; so just applying all its factors once.
+    for i, q in enumerate(Q):
+        term1 = exprGs[i](Pg, Pg.conj())
+        if q.dim() < 2: # diagonal or scalar Q 
+            term2 = total_numel/q.numel() # times I
+            ell = torch.max(torch.real(term1)) + term2  
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
+            q.mul_(1 - lr/L[i] * (term1 - term2))
+        else: # matrix Q
+            term2 = total_numel/q.shape[0] # times I
+            ell = norm_lower_bound_spd(term1) + term2
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
+            q.sub_(lr/L[i] * (term1 @ q - term2 * q))
+            for _ in range(10):
+                procrustes_step(q)
+                if (q.H - q).abs().amax() < 0.01 * q.abs().amax():
+                    break # q is almost SPD 
+            
+    if torch.rand([]) < 0.01: # balance factors of P
+        balance_kron_precond(Q)
+
+
 def update_precond_kron_whiten_quad(QL, exprs, G, lr=0.1, betaL=0.9, damping=1e-9):
     """
     Update the Kron preconditioner Q with a quadratic form. 
@@ -408,13 +440,14 @@ def update_precond_kron_whiten_quad(QL, exprs, G, lr=0.1, betaL=0.9, damping=1e-
 
 def update_precond_kron_whiten_quad4p(QL, exprs, G, lr=0.1, betaL=0.9, damping=1e-9):
     """
-    Almost the same as function update_precond_kron_whiten_quad except that fitting P directly. 
-    This is the only case that we fit P directly (Q here is P). Vulnerable to numerical errors.  
+    Almost the same as function update_precond_kron_whiten_quad except that fitting P directly (Q here actually is P). 
+    Vulnerable to numerical errors as the round-off errors could break the SPD property of P.
     """   
     Q, L = QL
     exprA, exprGs = exprs
 
     total_numel = G.numel() 
+    damping = damping + torch.finfo(G.dtype).resolution * G.abs().mean() 
     Pg = exprA(*Q, G + damping*torch.randn_like(G)) # Q actually is P; so just applying all its factors once.
     for i, q in enumerate(Q):
         term1 = exprGs[i](Pg, Pg.conj())
@@ -452,7 +485,8 @@ class KronWhiten:
     Another way is to damp and upper bound the fitted preconditioner such that P < eye/damping.   
     For extremely sparse gradients, increasing betaL (say to 0.999) helps a lot, where betaL is the EMA factor for the L-smoothness constant (wrt Q) estimation. 
 
-    3, Lastly, dQ is for the selection of geometry for preconditioner update. QEQ, QUAD and Q0p5EQ1p5 all are good choices. 
+    3, Lastly, dQ is for the selection of geometry for preconditioner update. 
+    The two recommended choices are dQ = Q0.5EQ1.5 and dP = P0.5EP1.5 (online Newton-Schulz iterations). 
     Q is initialized to preconditioner_init_scale * eye. Boolean setting whiten_grad decides to whiten whether the gradient or momentum. 
     Always good to check https://arxiv.org/abs/2402.11858 for math details. 
     """
@@ -485,9 +519,13 @@ class KronWhiten:
             assert self.momentum > 0, "Cannot whiten momentum if the momentum setting is zero."
             print(f"Recommend to reduce lr_params by {int(((1 + momentum)/(1 - momentum))**0.5)} times")
         self._dQ = dQ
-        if dQ == "QUAD4P": # the only case that we fit P directly 
-            assert max([torch.finfo(p.dtype).eps for p in self._params_with_grad]) < 1e-6, "Directly fitting P needs at least single precision"
-            self._update_precond = update_precond_kron_whiten_quad4p
+        if dQ in {"QUAD4P", "P0.5EP1.5", "P0p5EP1p5"}: # the only two cases that we fit P directly 
+            if max([torch.finfo(p.dtype).eps for p in self._params_with_grad]) > 1e-6:
+                print("Fitting P directly with half precision is risky.")
+            if dQ == "QUAD4P":
+                self._update_precond = update_precond_kron_whiten_quad4p
+            else:
+                self._update_precond = update_precond_kron_whiten_p0p5ep1p5
             self._precond_grad = lambda QL, exprs, G: exprs[0](*QL[0], G) # it's exprA(*Q, G) 
         else:
             self._precond_grad = precond_grad_kron            
@@ -500,7 +538,7 @@ class KronWhiten:
             elif dQ == "QUAD":
                 self._update_precond = update_precond_kron_whiten_quad
             else:
-                assert (dQ == "Q0.5EQ1.5") or (dQ == "Q0p5EQ1p5"), "Invalid choice for dQ"
+                assert dQ in {"Q0.5EQ1.5", "Q0p5EQ1p5"}, "Invalid choice for dQ"
                 self._update_precond = update_precond_kron_whiten_q0p5eq1p5
 
 
@@ -637,6 +675,36 @@ def update_precond_kron_newton_q0p5eq1p5(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, d
         balance_kron_precond(Q)
 
 
+def update_precond_kron_newton_p0p5ep1p5(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, damping=1e-9):
+    """
+    Update the Kron Newton-type preconditioner P as dP = P^0.5 * E * P^1.5 with a pair of vector and hvp, (V, Hvp).
+    It is almost the same as update_precond_kron_newton_q0p5eq1p5. But we fit P directly (Q actually is P here).  
+    """   
+    Q, L = QL
+    exprA, exprGs = exprs
+    damping = damping + torch.finfo(Hvp.dtype).resolution * Hvp.abs().mean()
+    Ph = exprA(*Q, Hvp + damping*torch.randn_like(Hvp)) # Q actually is P; so only need to apply its factors once.  
+
+    for i, q in enumerate(Q):
+        term1 = exprGs[i](Ph, Ph.conj())
+        term2 = exprGs[i](V, V.conj())
+        if q.dim() < 2: # diagonal or scalar Q 
+            ell = torch.max(torch.real(term1 + term2)) 
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
+            q.mul_(1 - lr/L[i] * (term1 - term2))
+        else: # matrix Q
+            ell = norm_lower_bound_spd(term1 + term2) 
+            L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
+            q.sub_(lr/L[i] * (term1 - term2) @ q)
+            for _ in range(10):
+                procrustes_step(q)
+                if (q.H - q).abs().amax() < 0.01 * q.abs().amax():
+                    break
+    
+    if torch.rand([]) < 0.01: # balance factors of Q
+        balance_kron_precond(Q)
+
+
 def update_precond_kron_newton_quad(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, damping=1e-9):
     """
     Update the Kron Newton-type preconditioner Q with a quadratic form for dQ and pair of vector and hvp, (V, Hvp). 
@@ -667,11 +735,12 @@ def update_precond_kron_newton_quad(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, dampin
 
 def update_precond_kron_newton_quad4p(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, damping=1e-9):
     """
-    Almost the same as function update_precond_kron_newton_quad except that we fit P directly. 
-    This is the only case that fits P directly (Q here is P). It's vulnerable to numerical errors.   
+    Almost the same as function update_precond_kron_newton_quad except that we fit P directly (Q here actually is P). 
+    It's vulnerable to numerical errors as the round-off errors could break the SPD property of P.   
     """   
     Q, L = QL
     exprA, exprGs = exprs
+    damping = damping + torch.finfo(Hvp.dtype).resolution * Hvp.abs().mean()
     Ph = exprA(*Q, Hvp + damping*torch.randn_like(Hvp)) # Q actually is P; so only need to apply its factors once.  
 
     for i, q in enumerate(Q):
@@ -711,9 +780,10 @@ class KronNewton:
 
     3, exact_hessian_vector_product. 
     By setting this flag to False, the finite difference method will be used for Hvp approximation. 
-    Be cautious with the finite difference method (possible numerical issues; the closure must behave like a pure function).
+    Be cautious with the finite difference method (possible numerical issues; the closure must behave like a stateless function).
 
-    4, Lastly, dQ is for the selection of geometry for preconditioner update. QEQ, QUAD and Q0p5EQ1p5 all are good choices. 
+    4, Lastly, dQ is for the selection of geometry for preconditioner update. 
+    The two recommended choices are dQ = Q0.5EQ1.5 and dP = P0.5EP1.5 (online Newton-Schulz iterations).  
     Both lr_params and lr_preconditioner are normalized learning rates. 
     Q is initialized to preconditioner_init_scale * eye. 
     Always good to check https://arxiv.org/abs/2402.11858 for math details. 
@@ -745,12 +815,16 @@ class KronNewton:
         self._ms, self._counter_m = None, 0 # momentum buffers and counter 
         self._exact_hessian_vector_product = exact_hessian_vector_product
         if not exact_hessian_vector_product:
-            print("FYI: Approximate Hvp with finite-difference method. Make sure that: 1) the closure behaves like a pure function; 2) delta param scale is proper.")
+            print("FYI: Approximate Hvp with finite-difference method. Make sure that: 1) the closure behaves like a stateless function; 2) delta param scale is proper.")
         self._dQ = dQ
-        if dQ == "QUAD4P": # the only case that fits P directly 
-            self._update_precond = update_precond_kron_newton_quad4p
+        if dQ in {"QUAD4P", "P0.5EP1.5", "P0p5EP1p5"}: # the only two cases that fits P directly and dQ actually is dP 
+            if eps > 1e-6:
+                print("Fitting P directly with half precision is risky.")
+            if dQ == "QUAD4P":
+                self._update_precond = update_precond_kron_newton_quad4p
+            else:
+                self._update_precond = update_precond_kron_newton_p0p5ep1p5
             self._precond_grad = lambda QL, exprs, G: exprs[0](*QL[0], G) # it's exprA(*Q, G) 
-            assert eps < 1e-6, "Directly fitting P needs at least single precision" 
         else:
             self._precond_grad = precond_grad_kron
             if dQ == "QUAD":
@@ -762,7 +836,7 @@ class KronNewton:
             elif dQ == "QEQ":
                 self._update_precond = update_precond_kron_newton_qeq
             else:
-                assert (dQ == "Q0.5EQ1.5") or (dQ == "Q0p5EQ1p5"), "Invalid choice for dQ"
+                assert dQ in {"Q0.5EQ1.5", "Q0p5EQ1p5"}, "Invalid choice for dQ"
                 self._update_precond = update_precond_kron_newton_q0p5eq1p5            
 
 
@@ -1054,7 +1128,7 @@ class LRANewton:
 
     3, exact_hessian_vector_product. 
     By setting this flag to False, the finite difference method will be used for Hvp approximation. 
-    Be cautious with the finite difference method (possible numerical issues; the closure must behave like a pure function).
+    Be cautious with the finite difference method (possible numerical issues; the closure must behave like a stateless function).
 
     4, Lastly, Q is initialized to preconditioner_init_scale * eye. 
     Both lr_params and lr_preconditioner are normalized learning rates. 
@@ -1094,7 +1168,7 @@ class LRANewton:
         self._m, self._counter_m = None, 0 # momentum buffer and counter 
         self._exact_hessian_vector_product = exact_hessian_vector_product
         if not exact_hessian_vector_product:
-            print("FYI: Approximate Hvp with finite-difference method. Make sure that: 1) the closure behaves like a pure function; 2) delta param scale is proper.")
+            print("FYI: Approximate Hvp with finite-difference method. Make sure that: 1) the closure behaves like a stateless function; 2) delta param scale is proper.")
 
 
     @torch.no_grad()
@@ -1217,6 +1291,21 @@ def update_precond_dense_q0p5eq1p5(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
     procrustes_step(Q)
 
 
+def update_precond_dense_p0p5ep1p5(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
+    """
+    Update dense matrix Newton-type preconditioner P with local coordinate dP = P^0.5 * mathcal{E} * P^1.5.
+    """
+    damping = damping + torch.finfo(h.dtype).resolution * h.abs().mean()
+    a = Q @ (h + damping*torch.randn_like(h)) # Q actually is P; so just apply it once. 
+    ell = torch.sum(a*a + v*v)
+    L.copy_(torch.max(betaL*L + (1 - betaL)*ell, ell))
+    Q.sub_(lr/L * (a @ (a.T @ Q) - v @ (v.T @ Q)))
+    for _ in range(10):
+        procrustes_step(Q)
+        if (Q.H - Q).abs().amax() < 0.01 * Q.abs().amax():
+            break
+
+
 def update_precond_dense_quad(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
     """
     Update dense matrix Newton-type preconditioner Q with a quadratic form for dQ.
@@ -1231,8 +1320,9 @@ def update_precond_dense_quad(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
 
 def update_precond_dense_quad4p(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
     """
-    The only case that fits P directly. 
+    Almost the same as update_precond_dense_quad. But it fits P directly. 
     """
+    damping = damping + torch.finfo(h.dtype).resolution * h.abs().mean()
     a = Q @ (h + damping*torch.randn_like(h)) # Q actually is P; so just apply it once. 
     ell = torch.sum(a*a + v*v)
     L.copy_(torch.max(betaL*L + (1 - betaL)*ell, ell))
@@ -1244,7 +1334,7 @@ def update_precond_dense_quad4p(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
 class DenseNewton:
     """
     Implements the PSGD dense matrix Newton-type preconditioner as a class. 
-    Be extra cautious when using the finite difference method for Hvp approximation (the closure must behave like a pure function).
+    Be extra cautious when using the finite difference method for Hvp approximation (the closure must behave like a stateless function).
     It's mainly for illustrating how PSGD works due to its simplicity. 
     It's also a good alternative to the BFGS like quasi-Newton methods as no line search is required. 
     """
@@ -1271,19 +1361,23 @@ class DenseNewton:
         if preconditioner_init_scale is None: # initialize Q on the fly
             self._Q = None 
         else:
-            if dQ == "QUAD4P": # Q actually is P 
+            if dQ in {"QUAD4P", "P0.5EP1.5", "P0p5EP1p5"}: # Q and dQ actually are P and dP, respectively  
                 preconditioner_init_scale *= preconditioner_init_scale
             self._Q = torch.eye(num_params, dtype=dtype, device=device) * preconditioner_init_scale
         self._L = lift2single(torch.zeros([], dtype=dtype, device=device)) # Lipschitz smoothness constant estimation for the psgd criterion 
         self._m, self._counter_m = None, 0 # buffer and counter for momentum 
         self._exact_hessian_vector_product = exact_hessian_vector_product
         if not exact_hessian_vector_product:
-            print("FYI: Approximate Hvp with finite-difference method. Make sure that: 1) the closure behaves like a pure function; 2) delta param scale is proper.")
+            print("FYI: Approximate Hvp with finite-difference method. Make sure that: 1) the closure behaves like a stateless function; 2) delta param scale is proper.")
         self._dQ = dQ
-        if dQ == "QUAD4P": # the only case that we fit P directly
-            self._update_precond = update_precond_dense_quad4p
+        if dQ in {"QUAD4P", "P0.5EP1.5", "P0p5EP1p5"}: # the only two cases that we fit P directly
+            if torch.finfo(dtype).eps > 1e-6:
+                print("Fitting P directly with half precision is risky.")
+            if dQ == "QUAD4P":
+                self._update_precond = update_precond_dense_quad4p
+            else:
+                self._update_precond = update_precond_dense_p0p5ep1p5
             self._precond_grad = lambda Q, g: Q @ g
-            assert torch.finfo(dtype).eps < 1e-6, "Directly fitting P needs at least single precision" 
         elif dQ == "QUAD":
             self._update_precond = update_precond_dense_quad
             self._precond_grad = lambda Q, g: Q @ (Q @ g) # Q is symmetric; just save one transpose 
@@ -1296,7 +1390,7 @@ class DenseNewton:
             elif dQ == "QEQ":
                 self._update_precond = update_precond_dense_qeq
             else: 
-                assert (dQ == "Q0p5EQ1p5") or (dQ == "Q0.5EQ1.5"), "Invalid choice for dQ"
+                assert dQ in {"Q0p5EQ1p5", "Q0.5EQ1.5"}, "Invalid choice for dQ"
                 self._update_precond = update_precond_dense_q0p5eq1p5
                         
 
@@ -1333,7 +1427,7 @@ class DenseNewton:
             h = torch.cat([torch.reshape(h, [-1, 1]) for h in Hvs]) 
             if self._Q is None: # initialize Q on the fly if it is None
                 scale = (torch.mean(v*v))**(1/4) * (torch.mean(h**4) + self.damping**4)**(-1/8)
-                if self._dQ == "QUAD4P": # Q actually is P in this case 
+                if self._dQ in {"QUAD4P", "P0.5EP1.5", "P0p5EP1p5"}: # Q actually is P in this case 
                     scale *= scale 
                 self._Q = torch.eye(len(v), dtype=v.dtype, device=v.device) * scale
 
