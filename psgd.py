@@ -21,7 +21,7 @@ The new PSGD-Kron Newton/Whitening preconditioners support five kinds of local c
 
 Both the QUAD and Q0.5EQ1.5 methods can be used to update P directly with little changes. 
 We call them QUAD4P and P0.5EP1.5/P0p5EP1p5, respectively. 
-P0.5EP1.5/P0p5EP1p5 still is a competitive choice most of the time.  
+P0.5EP1.5/P0p5EP1p5 still is a competitive and recommended choice for optimization with single or higher precisions.  
 
 The PSGD-LRA Newton/Whitening preconditioners still adopt local coordinate dQ = mathcal{E} * Q, 
 and needs a small linear solver to update the preconditioner.
@@ -93,13 +93,16 @@ def lift2single(x):
     return x.to(torch.float32) if torch.finfo(x.dtype).eps > 1e-6 else x
     
 
-def procrustes_step(Q, max_step_size=1/8):
+def procrustes_step2(Q, max_step_size=1/8):
     """
     A in-place (update Q directly) online solver for the orthogonal Procrustes problem,
         min_U || U Q - I ||_F,   s.t. U^H U = I
     by rotating Q as exp(a R) Q, where R = Q^H - Q is the generator and ||a R|| < 1. 
 
-    Do not set max_step_size > 1/4 as we only expand exp(a R) to its 2nd term. 
+    We expand exp(a R) to its 2nd term as 
+        I + aR + (aR)^2/2
+    and the truncation error is upper bounded as ||a R||^4/4. 
+    Set max_step_size <= 1/4 such that the truncation error <= (1/4)^4/4 < 1e-3.  
 
     Note that U(n) is connected and such rotations can make almost any complex Q SPD except for convergence to saddle points. 
     However, O(n) is not connected. Hence, such SO(n) rotations can only make real Q with det(Q) > 0 SPD. 
@@ -112,8 +115,37 @@ def procrustes_step(Q, max_step_size=1/8):
     RRQ = R @ RQ
     tr_RQ = RQ.diagonal().real.sum() # tr_RQ >=0 by theory; torch.trace not implemented for CPU bfloat16, so sum(diag())
     tr_RRQ = RRQ.diagonal().real.sum() # line search is needed if tr_RRQ < 0
-    a = torch.where(tr_RRQ < 0, torch.clamp(-tr_RQ / tr_RRQ, min=0, max=max_step_size), max_step_size)
+    a = torch.where(tr_RRQ < 0, torch.clamp(-tr_RQ / tr_RRQ, max=max_step_size), max_step_size)
     Q.add_(a * (RQ + 0.5 * a * RRQ))
+
+
+def procrustes_step3(Q, max_step_size=1/3):
+    """
+    A in-place (update Q directly) online solver for the orthogonal Procrustes problem,
+        min_U || U Q - I ||_F,   s.t. U^H U = I
+    by rotating Q as exp(a R) Q, where R = Q^H - Q is the generator and ||a R|| < 1. 
+
+    We expand exp(a R) to its 3rd term as 
+        I + aR + (aR)^2/2 + (aR)^3/8 
+    and the truncation error is upper bounded as ||a R||^6/64. 
+    Set max_step_size <= 5/8 such that the truncation error <= (5/8)^6/64 < 1e-3.  
+
+    Note that U(n) is connected and such rotations can make almost any complex Q SPD except for convergence to saddle points. 
+    However, O(n) is not connected. Hence, such SO(n) rotations can only make real Q with det(Q) > 0 SPD. 
+    """
+    R = Q.H - Q 
+    R /= norm_lower_bound_skh(R) + torch.finfo(R.dtype).smallest_normal # normalize R as typically it's too small 
+    RQ = R @ Q
+    RRQ = R @ RQ
+    RRRQ = R @ RRQ 
+    tr_RQ = RQ.diagonal().real.sum() # tr_RQ >=0 by theory; torch.trace not implemented for CPU bfloat16, so sum(diag())
+    tr_RRQ = RRQ.diagonal().real.sum() 
+    tr_RRRQ = RRRQ.diagonal().real.sum() # tr_RRRQ <=0 
+    if tr_RQ > 0 and tr_RRRQ < 0: # otherwise, Q^T = Q up to machine precision 
+        # optimal a is the larger root of tr_RQ + 2 * a * tr_RRQ / 2 + 3 * a^2 * tr_RRRQ / 8
+        a = (-tr_RRQ - torch.sqrt(tr_RRQ*tr_RRQ - 1.5*tr_RQ*tr_RRRQ)) / (0.75*tr_RRRQ)
+        a = torch.clamp(a, max=max_step_size) 
+        Q.add_(a * (RQ + 0.5 * a * (RRQ + 0.25 * a * RRRQ)))
 
 
 #############       Begin of PSGD Kronecker product preconditioners       #############         
@@ -293,6 +325,7 @@ def update_precond_kron_whiten_eq(QL, exprs, G, lr=0.1, betaL=0.9, damping=1e-9)
     Update the Kron preconditioner Q as dQ = E*Q.
     """
     V = torch.randn_like(G)
+    damping = damping + torch.finfo(G.dtype).eps * G.abs()
     update_precond_kron_eq(QL, exprs, V, G + damping*V, lr=lr, betaL=betaL)
     
 
@@ -307,6 +340,7 @@ def update_precond_kron_whiten_qep(QL, exprs, G, lr=0.1, betaL=0.9, damping=1e-9
     balance_kron_precond(Q) 
 
     total_numel = G.numel() 
+    damping = damping + torch.finfo(G.dtype).eps * G.abs()
     Pg = exprP(*[q.conj() for q in Q], *Q, G + damping*torch.randn_like(G)) 
     for i, q in enumerate(Q):
         QPg = exprQs[i](q, Pg)
@@ -331,6 +365,7 @@ def update_precond_kron_whiten_qeq(QL, exprs, G, lr=0.1, betaL=0.9, damping=1e-9
     exprP, exprGs = exprs
     
     total_numel = G.numel() 
+    damping = damping + torch.finfo(G.dtype).eps * G.abs()
     Pg = exprP(*[q.conj() for q in Q], *Q, G + damping*torch.randn_like(G)) 
     for i, q in enumerate(Q):
         term1 = exprGs[i](Pg, Pg.conj())
@@ -357,6 +392,7 @@ def update_precond_kron_whiten_q0p5eq1p5(QL, exprs, G, lr=0.1, betaL=0.9, dampin
     exprP, exprGs = exprs
     
     total_numel = G.numel() 
+    damping = damping + torch.finfo(G.dtype).eps * G.abs()
     Pg = exprP(*[q.conj() for q in Q], *Q, G + damping*torch.randn_like(G)) 
     for i, q in enumerate(Q):
         term1 = exprGs[i](Pg, Pg.conj())
@@ -370,7 +406,7 @@ def update_precond_kron_whiten_q0p5eq1p5(QL, exprs, G, lr=0.1, betaL=0.9, dampin
             ell = norm_lower_bound_spd(term1) + term2
             L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             q.sub_(lr/L[i] * (term1 @ q - term2 * q))
-            procrustes_step(q)
+            procrustes_step2(q)
             
     if torch.rand([]) < 0.01: # balance factors of Q
         balance_kron_precond(Q)
@@ -386,7 +422,7 @@ def update_precond_kron_whiten_p0p5ep1p5(QL, exprs, G, lr=0.1, betaL=0.9, dampin
     exprA, exprGs = exprs
     
     total_numel = G.numel() 
-    damping = damping + torch.finfo(G.dtype).resolution * G.abs().mean()  
+    damping = damping + torch.finfo(G.dtype).eps * G.abs()  
     Pg = exprA(*Q, G + damping*torch.randn_like(G)) # Q actually is P; so just applying all its factors once.
     for i, q in enumerate(Q):
         term1 = exprGs[i](Pg, Pg.conj())
@@ -401,8 +437,8 @@ def update_precond_kron_whiten_p0p5ep1p5(QL, exprs, G, lr=0.1, betaL=0.9, dampin
             L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             q.sub_(lr/L[i] * (term1 @ q - term2 * q))
             for _ in range(10):
-                procrustes_step(q)
-                if (q.H - q).abs().amax() < 0.01 * q.abs().amax():
+                procrustes_step3(q)
+                if (q.H - q).abs().amax() < 0.001 * q.abs().amax():
                     break # q is almost SPD 
             
     if torch.rand([]) < 0.01: # balance factors of P
@@ -417,6 +453,7 @@ def update_precond_kron_whiten_quad(QL, exprs, G, lr=0.1, betaL=0.9, damping=1e-
     exprP, exprGs = exprs
     
     total_numel = G.numel() 
+    damping = damping + torch.finfo(G.dtype).eps * G.abs()
     Pg = exprP(*[q.conj() for q in Q], *Q, G + damping*torch.randn_like(G))   
     for i, q in enumerate(Q):
         term1 = exprGs[i](Pg, Pg.conj())
@@ -447,7 +484,7 @@ def update_precond_kron_whiten_quad4p(QL, exprs, G, lr=0.1, betaL=0.9, damping=1
     exprA, exprGs = exprs
 
     total_numel = G.numel() 
-    damping = damping + torch.finfo(G.dtype).resolution * G.abs().mean() 
+    damping = damping + torch.finfo(G.dtype).eps * G.abs()
     Pg = exprA(*Q, G + damping*torch.randn_like(G)) # Q actually is P; so just applying all its factors once.
     for i, q in enumerate(Q):
         term1 = exprGs[i](Pg, Pg.conj())
@@ -507,7 +544,6 @@ class KronWhiten:
         self._preconditioner_max_skew = preconditioner_max_skew
         params_with_grad = [params_with_grad,] if isinstance(params_with_grad, torch.Tensor) else params_with_grad
         self._params_with_grad = [param for param in params_with_grad if param.requires_grad] # double check requires_grad flag 
-        self._num_params = sum([p.numel() for p in self._params_with_grad])
         if preconditioner_init_scale is None:
             self._QLs_exprs = None # initialize on the fly 
             print("FYI: Will set the preconditioner initial scale on the fly. Recommend to set it manually.")
@@ -579,15 +615,10 @@ class KronWhiten:
             pre_grads = [self._precond_grad(*QL_exprs, m) for (QL_exprs, m) in zip(self._QLs_exprs, self._ms)]
         else: # precondition gradient 
             pre_grads = [self._precond_grad(*QL_exprs, g) for (QL_exprs, g) in zip(self._QLs_exprs, grads)]
-
-        lr = self.lr_params
-        if self.grad_clip_max_amp < float("inf"): # clip preconditioned gradient 
-            avg_amp = torch.sqrt(torch.real(sum([torch.sum(g*g.conj()) for g in pre_grads]))/self._num_params)
-            if avg_amp > self.grad_clip_max_amp:
-                lr = lr * self.grad_clip_max_amp / avg_amp
             
-        # Update the parameters. 
-        [param.subtract_(lr*g.view_as(param)) for (param, g) in zip(self._params_with_grad, pre_grads)]        
+        # Update the parameters after clipping the preconditioned gradient per tensor 
+        [param.subtract_(self.lr_params/torch.clamp(torch.sqrt(torch.real(torch.mean(g*g.conj())))/self.grad_clip_max_amp, min=1) * g.view_as(param)) 
+         for (param, g) in zip(self._params_with_grad, pre_grads)]        
 
         # return whatever closure returns
         return closure_returns
@@ -596,7 +627,8 @@ class KronWhiten:
 def update_precond_kron_newton_eq(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, damping=1e-9):
     """
     Update the Kron Newton-type preconditioner Q as dQ = E*Q with a pair of vector and hvp, (V, Hvp). 
-    """    
+    """ 
+    damping = damping + torch.finfo(Hvp.dtype).eps * Hvp.abs()   
     update_precond_kron_eq(QL, exprs, V, Hvp + damping*torch.randn_like(Hvp), lr=lr, betaL=betaL)
 
 
@@ -609,6 +641,7 @@ def update_precond_kron_newton_qep(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, damping
 
     # balancing is not optional as L for each factor is not scaling invariant 
     balance_kron_precond(Q) 
+    damping = damping + torch.finfo(Hvp.dtype).eps * Hvp.abs()
     Ph = exprP(*[q.conj() for q in Q], *Q, Hvp + damping*torch.randn_like(Hvp)) 
 
     for i, q in enumerate(Q):
@@ -632,6 +665,7 @@ def update_precond_kron_newton_qeq(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, damping
     """   
     Q, L = QL
     exprP, exprGs = exprs
+    damping = damping + torch.finfo(Hvp.dtype).eps * Hvp.abs()
     Ph = exprP(*[q.conj() for q in Q], *Q, Hvp + damping*torch.randn_like(Hvp)) 
 
     for i, q in enumerate(Q):
@@ -656,6 +690,7 @@ def update_precond_kron_newton_q0p5eq1p5(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, d
     """   
     Q, L = QL
     exprP, exprGs = exprs
+    damping = damping + torch.finfo(Hvp.dtype).eps * Hvp.abs()
     Ph = exprP(*[q.conj() for q in Q], *Q, Hvp + damping*torch.randn_like(Hvp)) 
 
     for i, q in enumerate(Q):
@@ -669,7 +704,7 @@ def update_precond_kron_newton_q0p5eq1p5(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, d
             ell = norm_lower_bound_spd(term1 + term2) 
             L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             q.sub_(lr/L[i] * (term1 - term2) @ q)
-            procrustes_step(q)
+            procrustes_step2(q)
     
     if torch.rand([]) < 0.01: # balance factors of Q
         balance_kron_precond(Q)
@@ -682,7 +717,7 @@ def update_precond_kron_newton_p0p5ep1p5(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, d
     """   
     Q, L = QL
     exprA, exprGs = exprs
-    damping = damping + torch.finfo(Hvp.dtype).resolution * Hvp.abs().mean()
+    damping = damping + torch.finfo(Hvp.dtype).eps * Hvp.abs()
     Ph = exprA(*Q, Hvp + damping*torch.randn_like(Hvp)) # Q actually is P; so only need to apply its factors once.  
 
     for i, q in enumerate(Q):
@@ -697,8 +732,8 @@ def update_precond_kron_newton_p0p5ep1p5(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, d
             L[i].copy_(torch.max(betaL*L[i] + (1 - betaL)*ell, ell))
             q.sub_(lr/L[i] * (term1 - term2) @ q)
             for _ in range(10):
-                procrustes_step(q)
-                if (q.H - q).abs().amax() < 0.01 * q.abs().amax():
+                procrustes_step3(q)
+                if (q.H - q).abs().amax() < 0.001 * q.abs().amax():
                     break
     
     if torch.rand([]) < 0.01: # balance factors of Q
@@ -711,6 +746,7 @@ def update_precond_kron_newton_quad(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, dampin
     """   
     Q, L = QL
     exprP, exprGs = exprs
+    damping = damping + torch.finfo(Hvp.dtype).eps * Hvp.abs()
     Ph = exprP(*[q.conj() for q in Q], *Q, Hvp + damping*torch.randn_like(Hvp)) 
 
     for i, q in enumerate(Q):
@@ -740,7 +776,7 @@ def update_precond_kron_newton_quad4p(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, damp
     """   
     Q, L = QL
     exprA, exprGs = exprs
-    damping = damping + torch.finfo(Hvp.dtype).resolution * Hvp.abs().mean()
+    damping = damping + torch.finfo(Hvp.dtype).eps * Hvp.abs()
     Ph = exprA(*Q, Hvp + damping*torch.randn_like(Hvp)) # Q actually is P; so only need to apply its factors once.  
 
     for i, q in enumerate(Q):
@@ -996,6 +1032,7 @@ def update_precond_lra_whiten(UVd, Luvd, g, lr=0.1, betaL=0.9, damping=1e-9):
     Update the LRA whiten preconditioner. 
     """
     v = torch.randn_like(g)
+    damping = damping + torch.finfo(g.dtype).eps * g.abs()
     update_precond_lra(UVd, Luvd, v, g + damping*v, lr=lr, betaL=betaL)
 
 
@@ -1109,6 +1146,7 @@ def update_precond_lra_newton(UVd, Luvd, v, h, lr=0.1, betaL=0.9, damping=1e-9):
     """
     Update the LRA Newton preconditioner. 
     """
+    damping = damping + torch.finfo(h.dtype).eps * h.abs()
     update_precond_lra(UVd, Luvd, v, h + damping*torch.randn_like(h), lr=lr, betaL=betaL)
 
 
@@ -1252,6 +1290,7 @@ def update_precond_dense_eq(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
     """
     Update dense matrix Newton-type preconditioner Q with local coordinate dQ = mathcal{E} * Q.
     """
+    damping = damping + torch.finfo(h.dtype).eps * h.abs()
     a = Q.mm(h + damping*torch.randn_like(h))
     b = torch.linalg.solve_triangular(lift2single(Q.t()), lift2single(v), upper=False).to(v.dtype)
     ell = torch.sum(a*a + b*b)
@@ -1263,6 +1302,7 @@ def update_precond_dense_qep(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
     """
     Update dense matrix Newton-type preconditioner Q with local coordinate dQ = Q * mathcal{E} * P.
     """
+    damping = damping + torch.finfo(h.dtype).eps * h.abs()
     a = Q @ (Q.T @ (Q @ (h + damping*torch.randn_like(h))))
     b = Q @ v
     ell = torch.sum(a*a + b*b)
@@ -1274,6 +1314,7 @@ def update_precond_dense_qeq(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
     """
     Update dense matrix Newton-type preconditioner Q with local coordinate dQ = Q * mathcal{E} * Q.
     """
+    damping = damping + torch.finfo(h.dtype).eps * h.abs()
     a = Q.T @ (Q @ (h + damping*torch.randn_like(h)))
     ell = torch.sum(a*a + v*v)
     L.copy_(torch.max(betaL*L + (1 - betaL)*ell, ell))
@@ -1284,25 +1325,26 @@ def update_precond_dense_q0p5eq1p5(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
     """
     Update dense matrix Newton-type preconditioner Q with local coordinate dQ = Q^0.5 * mathcal{E} * Q^1.5.
     """
+    damping = damping + torch.finfo(h.dtype).eps * h.abs()
     a = Q.T @ (Q @ (h + damping*torch.randn_like(h)))
     ell = torch.sum(a*a + v*v)
     L.copy_(torch.max(betaL*L + (1 - betaL)*ell, ell))
     Q.sub_(lr/L * (a @ (a.T @ Q) - v @ (v.T @ Q)))
-    procrustes_step(Q)
+    procrustes_step2(Q)
 
 
 def update_precond_dense_p0p5ep1p5(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
     """
     Update dense matrix Newton-type preconditioner P with local coordinate dP = P^0.5 * mathcal{E} * P^1.5.
     """
-    damping = damping + torch.finfo(h.dtype).resolution * h.abs().mean()
+    damping = damping + torch.finfo(h.dtype).eps * h.abs()
     a = Q @ (h + damping*torch.randn_like(h)) # Q actually is P; so just apply it once. 
     ell = torch.sum(a*a + v*v)
     L.copy_(torch.max(betaL*L + (1 - betaL)*ell, ell))
     Q.sub_(lr/L * (a @ (a.T @ Q) - v @ (v.T @ Q)))
     for _ in range(10):
-        procrustes_step(Q)
-        if (Q.H - Q).abs().amax() < 0.01 * Q.abs().amax():
+        procrustes_step3(Q)
+        if (Q.H - Q).abs().amax() < 0.001 * Q.abs().amax():
             break
 
 
@@ -1310,6 +1352,7 @@ def update_precond_dense_quad(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
     """
     Update dense matrix Newton-type preconditioner Q with a quadratic form for dQ.
     """
+    damping = damping + torch.finfo(h.dtype).eps * h.abs()
     a = Q @ (Q @ (h + damping*torch.randn_like(h))) # Q is symmetric here 
     ell = torch.sum(a*a + v*v)
     L.copy_(torch.max(betaL*L + (1 - betaL)*ell, ell))
@@ -1322,7 +1365,7 @@ def update_precond_dense_quad4p(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
     """
     Almost the same as update_precond_dense_quad. But it fits P directly. 
     """
-    damping = damping + torch.finfo(h.dtype).resolution * h.abs().mean()
+    damping = damping + torch.finfo(h.dtype).eps * h.abs()
     a = Q @ (h + damping*torch.randn_like(h)) # Q actually is P; so just apply it once. 
     ell = torch.sum(a*a + v*v)
     L.copy_(torch.max(betaL*L + (1 - betaL)*ell, ell))
