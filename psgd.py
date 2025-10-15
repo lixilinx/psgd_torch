@@ -20,8 +20,8 @@ The new PSGD-Kron Newton/Whitening preconditioners support five kinds of local c
     But, one drawback is that Q might get stuck around ill-conditioned matrices (not strongly convex). 
 
 Both the QUAD and Q0.5EQ1.5 methods can be used to update P directly with little changes. 
-We call them QUAD4P and P0.5EP1.5/P0p5EP1p5, respectively. 
-P0.5EP1.5/P0p5EP1p5 still is a competitive and recommended choice for optimization with single or higher precisions.  
+We call them QUAD4P and PRO4P (PRO is from Procrustes), respectively. 
+PRO4P still is a competitive and recommended choice for optimization with single precisions.  
 
 The PSGD-LRA Newton/Whitening preconditioners still adopt local coordinate dQ = mathcal{E} * Q, 
 and needs a small linear solver to update the preconditioner.
@@ -41,9 +41,9 @@ import torch
 def norm_lower_bound_spd(A, k=32, half_iters=2):
     """
     Returns a cheap lower bound for the spectral norm of a symmetric positive definite matrix A, where,
-        k: the dim of subspace, suggesting 128 for bfloat16, 32 for float32 and 4 for float64 (tested on my laptop 4070 GPU);
+        k: the dim of subspace, suggesting 128 for bfloat16 and 32 for float32 (tested on my laptop 4070 GPU);
         half_iters: half of the number of subspace iterations, suggesting 2.  
-    A rough norm estimation is good, and we don't orthonormaliz the subspace vectors. 
+    A rough norm estimation with bfloat16 is good enough, and we don't orthonormaliz the subspace vectors. 
 
     The initial noise space V is rotated such that its centroid aligns with the largest row of A. 
     Hence, each row of V and the largest row of A has an angle about acos(1/sqrt(k)) when k << dim(A). 
@@ -66,9 +66,9 @@ def norm_lower_bound_spd(A, k=32, half_iters=2):
 def norm_lower_bound_skh(A, k=32, half_iters=2):
     """
     Returns a cheap lower bound for the spectral norm of a skew-Hermitian matrix A,
-        k: the dim of subspace, suggesting 128 for bfloat16, 32 for float32 and 4 for float64 (tested on my laptop 4070 GPU);
+        k: the dim of subspace, suggesting 128 for bfloat16 and 32 for float32 (tested on my laptop 4070 GPU);
         half_iters: half of the number of subspace iterations, suggesting 2.  
-    A rough norm estimation is good, and we don't orthonormaliz the subspace vectors. 
+    A rough norm estimation with bfloat16 is good enough, and we don't orthonormaliz the subspace vectors. 
 
     The initial noise space V is rotated such that its centroid aligns with the largest row of A. 
     Hence, each row of V and the largest row of A has an angle about acos(1/sqrt(k)) when k << dim(A). 
@@ -89,7 +89,7 @@ def norm_lower_bound_skh(A, k=32, half_iters=2):
     
 
 def lift2single(x):
-    # lift half or lower precision to single precision; leave single or higher precision unchanged  
+    # lift half or lower precision to single precision; leave single precision unchanged  
     return x.to(torch.float32) if torch.finfo(x.dtype).eps > 1e-6 else x
     
 
@@ -142,7 +142,7 @@ def procrustes_step3(Q, max_step_size=1/3):
     tr_RRQ = RRQ.diagonal().real.sum() 
     tr_RRRQ = RRRQ.diagonal().real.sum() # tr_RRRQ <=0 
     if tr_RQ > 0 and tr_RRRQ < 0: # otherwise, Q^T = Q up to machine precision 
-        # optimal a is the larger root of tr_RQ + 2 * a * tr_RRQ / 2 + 3 * a^2 * tr_RRRQ / 8
+        # optimal a is the larger root of tr_RQ + 2 * a * tr_RRQ / 2 + 3 * a^2 * tr_RRRQ / 8 = 0
         a = (-tr_RRQ - torch.sqrt(tr_RRQ*tr_RRQ - 1.5*tr_RQ*tr_RRRQ)) / (0.75*tr_RRRQ)
         a = torch.clamp(a, max=max_step_size) 
         Q.add_(a * (RQ + 0.5 * a * (RRQ + 0.25 * a * RRRQ)))
@@ -176,7 +176,7 @@ def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="Q0.5EQ1.5")
 
         Please check https://drive.google.com/file/d/1CEEq7A3_l8EcPEDa_sYtqr5aMLVeZWL7/view?usp=drive_link for notations and derivations. 
     """
-    if dQ in {"QUAD4P", "P0.5EP1.5", "P0p5EP1p5"}: # the only two cases that we fit P directly; so square Scale 
+    if dQ in {"QUAD4P", "PRO4P"}: # the only two cases that we fit P directly; so square Scale 
         Scale = Scale ** 2 
     shape = t.shape 
     if len(shape)==0: # scalar 
@@ -252,7 +252,7 @@ def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="Q0.5EQ1.5")
     elif dQ in {"QEQ", "QUAD", "Q0p5EQ1p5", "Q0.5EQ1.5"}:
         return [[Q, L], (exprP, exprGs)]
     else: # the only two cases that we fit P directly; dQ actually is dP 
-        assert dQ in {"QUAD4P", "P0.5EP1.5", "P0p5EP1p5"}, "Invalid choice for dQ" 
+        assert dQ in {"QUAD4P", "PRO4P"}, "Invalid choice for dQ" 
         return [[Q, L], (exprA, exprGs)]
 
 
@@ -412,9 +412,9 @@ def update_precond_kron_whiten_q0p5eq1p5(QL, exprs, G, lr=0.1, betaL=0.9, dampin
         balance_kron_precond(Q)
 
 
-def update_precond_kron_whiten_p0p5ep1p5(QL, exprs, G, lr=0.1, betaL=0.9, damping=1e-9):
+def update_precond_kron_whiten_pro4p(QL, exprs, G, lr=0.1, betaL=0.9, damping=1e-9):
     """
-    Update the Kron preconditioner P as dP = P^0.5 * E * P^1.5. 
+    Update the Kron preconditioner P as dP = P^0.5 * E * P. 
     Almost the same as update_precond_kron_whiten_q0p5eq1p5. But the Q here actually is P. 
     Unlike fitting Q, fitting P directly is more sensitive to numerical round-off errors. 
     """   
@@ -523,7 +523,7 @@ class KronWhiten:
     For extremely sparse gradients, increasing betaL (say to 0.999) helps a lot, where betaL is the EMA factor for the L-smoothness constant (wrt Q) estimation. 
 
     3, Lastly, dQ is for the selection of geometry for preconditioner update. 
-    The two recommended choices are dQ = Q0.5EQ1.5 and dP = P0.5EP1.5 (online Newton-Schulz iterations). 
+    The two recommended choices are dQ = Q0.5EQ1.5 and dP = P0.5EP (online Newton-Schulz iterations). 
     Q is initialized to preconditioner_init_scale * eye. Boolean setting whiten_grad decides to whiten whether the gradient or momentum. 
     Always good to check https://arxiv.org/abs/2402.11858 for math details. 
     """
@@ -555,13 +555,13 @@ class KronWhiten:
             assert self.momentum > 0, "Cannot whiten momentum if the momentum setting is zero."
             print(f"Recommend to reduce lr_params by {int(((1 + momentum)/(1 - momentum))**0.5)} times")
         self._dQ = dQ
-        if dQ in {"QUAD4P", "P0.5EP1.5", "P0p5EP1p5"}: # the only two cases that we fit P directly 
+        if dQ in {"QUAD4P", "PRO4P"}: # the only two cases that we fit P directly 
             if max([torch.finfo(p.dtype).eps for p in self._params_with_grad]) > 1e-6:
                 print("Fitting P directly with half precision is risky.")
             if dQ == "QUAD4P":
                 self._update_precond = update_precond_kron_whiten_quad4p
-            else:
-                self._update_precond = update_precond_kron_whiten_p0p5ep1p5
+            else: # dP = P^0.5 * E * P
+                self._update_precond = update_precond_kron_whiten_pro4p
             self._precond_grad = lambda QL, exprs, G: exprs[0](*QL[0], G) # it's exprA(*Q, G) 
         else:
             self._precond_grad = precond_grad_kron            
@@ -710,9 +710,9 @@ def update_precond_kron_newton_q0p5eq1p5(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, d
         balance_kron_precond(Q)
 
 
-def update_precond_kron_newton_p0p5ep1p5(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, damping=1e-9):
+def update_precond_kron_newton_pro4p(QL, exprs, V, Hvp, lr=0.1, betaL=0.9, damping=1e-9):
     """
-    Update the Kron Newton-type preconditioner P as dP = P^0.5 * E * P^1.5 with a pair of vector and hvp, (V, Hvp).
+    Update the Kron Newton-type preconditioner P as dP = P^0.5 * E * P with a pair of vector and hvp, (V, Hvp).
     It is almost the same as update_precond_kron_newton_q0p5eq1p5. But we fit P directly (Q actually is P here).  
     """   
     Q, L = QL
@@ -819,7 +819,7 @@ class KronNewton:
     Be cautious with the finite difference method (possible numerical issues; the closure must behave like a stateless function).
 
     4, Lastly, dQ is for the selection of geometry for preconditioner update. 
-    The two recommended choices are dQ = Q0.5EQ1.5 and dP = P0.5EP1.5 (online Newton-Schulz iterations).  
+    The two recommended choices are dQ = Q0.5EQ1.5 and dP = P0.5EP (online Newton-Schulz iterations).  
     Both lr_params and lr_preconditioner are normalized learning rates. 
     Q is initialized to preconditioner_init_scale * eye. 
     Always good to check https://arxiv.org/abs/2402.11858 for math details. 
@@ -853,13 +853,13 @@ class KronNewton:
         if not exact_hessian_vector_product:
             print("FYI: Approximate Hvp with finite-difference method. Make sure that: 1) the closure behaves like a stateless function; 2) delta param scale is proper.")
         self._dQ = dQ
-        if dQ in {"QUAD4P", "P0.5EP1.5", "P0p5EP1p5"}: # the only two cases that fits P directly and dQ actually is dP 
+        if dQ in {"QUAD4P", "PRO4P"}: # the only two cases that fits P directly and dQ actually is dP 
             if eps > 1e-6:
                 print("Fitting P directly with half precision is risky.")
             if dQ == "QUAD4P":
                 self._update_precond = update_precond_kron_newton_quad4p
-            else:
-                self._update_precond = update_precond_kron_newton_p0p5ep1p5
+            else: # dP = P^0.5 * E * P
+                self._update_precond = update_precond_kron_newton_pro4p
             self._precond_grad = lambda QL, exprs, G: exprs[0](*QL[0], G) # it's exprA(*Q, G) 
         else:
             self._precond_grad = precond_grad_kron
@@ -1333,9 +1333,9 @@ def update_precond_dense_q0p5eq1p5(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
     procrustes_step2(Q)
 
 
-def update_precond_dense_p0p5ep1p5(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
+def update_precond_dense_pro4p(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
     """
-    Update dense matrix Newton-type preconditioner P with local coordinate dP = P^0.5 * mathcal{E} * P^1.5.
+    Update dense matrix Newton-type preconditioner P with local coordinate dP = P^0.5 * mathcal{E} * P.
     """
     damping = damping + torch.finfo(h.dtype).eps * h.abs()
     a = Q @ (h + damping*torch.randn_like(h)) # Q actually is P; so just apply it once. 
@@ -1344,7 +1344,7 @@ def update_precond_dense_p0p5ep1p5(Q, L, v, h, lr=0.1, betaL=0.9, damping=1e-9):
     Q.sub_(lr/L * (a @ (a.T @ Q) - v @ (v.T @ Q)))
     for _ in range(10):
         procrustes_step3(Q)
-        if (Q.H - Q).abs().amax() < 0.001 * Q.abs().amax():
+        if (Q.T - Q).abs().amax() < 0.001 * Q.abs().amax():
             break
 
 
@@ -1404,7 +1404,7 @@ class DenseNewton:
         if preconditioner_init_scale is None: # initialize Q on the fly
             self._Q = None 
         else:
-            if dQ in {"QUAD4P", "P0.5EP1.5", "P0p5EP1p5"}: # Q and dQ actually are P and dP, respectively  
+            if dQ in {"QUAD4P", "PRO4P"}: # Q and dQ actually are P and dP, respectively  
                 preconditioner_init_scale *= preconditioner_init_scale
             self._Q = torch.eye(num_params, dtype=dtype, device=device) * preconditioner_init_scale
         self._L = lift2single(torch.zeros([], dtype=dtype, device=device)) # Lipschitz smoothness constant estimation for the psgd criterion 
@@ -1413,13 +1413,13 @@ class DenseNewton:
         if not exact_hessian_vector_product:
             print("FYI: Approximate Hvp with finite-difference method. Make sure that: 1) the closure behaves like a stateless function; 2) delta param scale is proper.")
         self._dQ = dQ
-        if dQ in {"QUAD4P", "P0.5EP1.5", "P0p5EP1p5"}: # the only two cases that we fit P directly
+        if dQ in {"QUAD4P", "PRO4P"}: # the only two cases that we fit P directly
             if torch.finfo(dtype).eps > 1e-6:
                 print("Fitting P directly with half precision is risky.")
             if dQ == "QUAD4P":
                 self._update_precond = update_precond_dense_quad4p
-            else:
-                self._update_precond = update_precond_dense_p0p5ep1p5
+            else: # dP = P^0.5 * E * P
+                self._update_precond = update_precond_dense_pro4p
             self._precond_grad = lambda Q, g: Q @ g
         elif dQ == "QUAD":
             self._update_precond = update_precond_dense_quad
@@ -1470,7 +1470,7 @@ class DenseNewton:
             h = torch.cat([torch.reshape(h, [-1, 1]) for h in Hvs]) 
             if self._Q is None: # initialize Q on the fly if it is None
                 scale = (torch.mean(v*v))**(1/4) * (torch.mean(h**4) + self.damping**4)**(-1/8)
-                if self._dQ in {"QUAD4P", "P0.5EP1.5", "P0p5EP1p5"}: # Q actually is P in this case 
+                if self._dQ in {"QUAD4P", "PRO4P"}: # Q actually is P in this case 
                     scale *= scale 
                 self._Q = torch.eye(len(v), dtype=v.dtype, device=v.device) * scale
 
