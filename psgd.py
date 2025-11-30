@@ -143,6 +143,8 @@ def procrustes_step3(Q, max_step_size=1/3):
     tr_RRRQ = RRRQ.diagonal().real.sum() # tr_RRRQ <=0 
     if tr_RQ > 0 and tr_RRRQ < 0: # otherwise, Q^T = Q up to machine precision 
         # optimal a is the larger root of tr_RQ + 2 * a * tr_RRQ / 2 + 3 * a^2 * tr_RRRQ / 8 = 0
+        if torch.finfo(tr_RQ.dtype).eps > 1e-6: # half precision is not accurate enough when tr_RRQ < 0 
+            tr_RQ, tr_RRQ, tr_RRRQ = tr_RQ.to(torch.float32), tr_RRQ.to(torch.float32), tr_RRRQ.to(torch.float32)
         a = (-tr_RRQ - torch.sqrt(tr_RRQ*tr_RRQ - 1.5*tr_RQ*tr_RRRQ)) / (0.75*tr_RRRQ)
         a = torch.clamp(a, max=max_step_size) 
         Q.add_(a * (RQ + 0.5 * a * (RRQ + 0.25 * a * RRRQ)))
