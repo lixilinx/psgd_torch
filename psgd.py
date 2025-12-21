@@ -518,9 +518,9 @@ class KronWhiten:
     With preconditioner_max_size 20, we use a dense preconditioner for the first dim since 10 <= 20 and diagonal preconditioner for the second dim since 50 > 20. 
     With preconditioner_max_skew 1.5, we use a dense preconditioner for the first dim since 10/50 <= 1.5 and diagonal preconditioner for the second dim since 50/10 > 1.5.
  
-    2, grad_clip_max_amp, betaL and damping. These three together help to stabilize the training. 
+    2, grad_clip_max_amps, betaL and damping. These three together help to stabilize the training. 
     PSGD here tries to normalize the gradients to unit amplitude. This can be problematic when gradients approach zeros. 
-    The most effective way is to clip the preconditioned gradients if their amplitudes exceed grad_clip_max_amp, say 1.0.
+    The most effective way is to clip the preconditioned gradients if their average/element-wise amplitudes exceed grad_clip_max_amps[0]/[1], respectively.
     Another way is to damp and upper bound the fitted preconditioner such that P < eye/damping.   
     For extremely sparse gradients, increasing betaL (say to 0.999) helps a lot, where betaL is the EMA factor for the L-smoothness constant (wrt Q) estimation. 
 
@@ -531,16 +531,17 @@ class KronWhiten:
     """
     def __init__(self,  params_with_grad, 
                  preconditioner_max_size=float("inf"), preconditioner_max_skew=1.0, preconditioner_init_scale:float|None=None,
-                 lr_params=0.001, lr_preconditioner=0.1, betaL=0.9, damping=1e-9, momentum=0.0,
-                 grad_clip_max_amp=float("inf"), preconditioner_update_probability=1.0, whiten_grad=True, dQ="Q0.5EQ1.5"):
+                 lr_params=0.001, lr_preconditioner=0.1, betaL=0.9, damping=1e-9, momentum=0.0, grad_clip_max_amps=(2.0, 10.0), 
+                 preconditioner_update_probability=1.0, update_preconditioner_first=True, whiten_grad=True, dQ="Q0.5EQ1.5"):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner 
         self.betaL = betaL # beta for the Lipschitz smoothness constant estimation; set to a large value for sparse gradients
         self.damping = damping # to damp and upper bound the preconditioner such that P < eye/damping  
         self.momentum = momentum if (0<momentum<1) else 0.0
-        self.grad_clip_max_amp = grad_clip_max_amp # clip grad once its average amplitude exceeds this max amplitude setting 
+        self.grad_clip_max_amps = grad_clip_max_amps # clip grad with thresholds (max average amplitude, max element-wise amplitude) 
         self.preconditioner_update_probability = preconditioner_update_probability
+        self.update_preconditioner_first = update_preconditioner_first, # True for biased update; False for unbiased update.
         # protected members
         self._preconditioner_max_size = preconditioner_max_size
         self._preconditioner_max_skew = preconditioner_max_skew
@@ -605,7 +606,12 @@ class KronWhiten:
         else:
             self._ms, self._counter_m = None, 0
 
-        if torch.rand([]) < self.preconditioner_update_probability: # update Q
+        if torch.rand([]) < self.preconditioner_update_probability:
+            update_preconditioner_first, update_preconditioner_last = self.update_preconditioner_first, not self.update_preconditioner_first
+        else:
+            update_preconditioner_first, update_preconditioner_last = False, False
+
+        if update_preconditioner_first: # update Q
             if self._whiten_grad: # Q whitens gradient 
                 [self._update_precond(*QL_exprs, g, lr=self.lr_preconditioner, betaL=self.betaL, damping=self.damping) 
                  for (QL_exprs, g) in zip(self._QLs_exprs, grads)]
@@ -617,10 +623,26 @@ class KronWhiten:
             pre_grads = [self._precond_grad(*QL_exprs, m) for (QL_exprs, m) in zip(self._QLs_exprs, self._ms)]
         else: # precondition gradient 
             pre_grads = [self._precond_grad(*QL_exprs, g) for (QL_exprs, g) in zip(self._QLs_exprs, grads)]
+
+        if update_preconditioner_last: # update Q
+            if self._whiten_grad: # Q whitens gradient 
+                [self._update_precond(*QL_exprs, g, lr=self.lr_preconditioner, betaL=self.betaL, damping=self.damping) 
+                 for (QL_exprs, g) in zip(self._QLs_exprs, grads)]
+            else: # Q whitens momentum 
+                [self._update_precond(*QL_exprs, m, lr=self.lr_preconditioner, betaL=self.betaL, damping=self.damping) 
+                 for (QL_exprs, m) in zip(self._QLs_exprs, self._ms)]
             
         # Update the parameters after clipping the preconditioned gradient per tensor 
-        [param.subtract_(self.lr_params/torch.clamp(torch.sqrt(torch.real(torch.mean(g*g.conj())))/self.grad_clip_max_amp, min=1) * g.view_as(param)) 
-         for (param, g) in zip(self._params_with_grad, pre_grads)]        
+        max_avg_amp, max_element_amp = self.grad_clip_max_amps 
+        for param, g in zip(self._params_with_grad, pre_grads):
+            avg_amp = torch.sqrt(torch.real(torch.mean(g*g.conj())))
+            if avg_amp > max_avg_amp:
+                g *= max_avg_amp/avg_amp
+            if torch.is_complex(g):
+                g /= torch.clamp(torch.abs(g)/max_element_amp, min=1.0) 
+            else:
+                g.clamp(min=-max_element_amp, max=max_element_amp)
+            param.subtract_(g.view_as(param), alpha=self.lr_params)
 
         # return whatever closure returns
         return closure_returns
@@ -1047,9 +1069,9 @@ class LRAWhiten:
     Preconditioner Q has a diagonal part and a low rank part, whose rank is decided by this setting. 
     Rank 0 reduces Q to a diagonal preconditioner. 
  
-    2, grad_clip_max_amp, betaL and damping. These three together help to stabilize the training. 
+    2, grad_clip_max_amps, betaL and damping. These three together help to stabilize the training. 
     PSGD here tries to normalize the gradients to unit amplitude. This can be problematic when gradients approach zeros. 
-    The most effective way is to clip the preconditioned gradients when their amplitudes exceed grad_clip_max_amp, say 1.0. 
+    The most effective way is to clip the preconditioned gradients when their average/element-wise amplitudes exceed grad_clip_max_amps[0]/[1], respectively. 
     Another way is to damp and upper bound the fitted preconditioner as P < eye/damping. 
     For extremely sparse gradient, increasing betaL (say to 0.999) also helps a lot, where betaL is the EMA factor for the L-smoothness constant (wrt Q) estimation. 
     
@@ -1058,16 +1080,17 @@ class LRAWhiten:
     Always good to check https://arxiv.org/abs/2402.11858 for math details. 
     """
     def __init__(self,  params_with_grad, rank_of_approximation:int=10, preconditioner_init_scale:float|None=None,
-                        lr_params=0.001, lr_preconditioner=0.1, betaL=0.9, damping=1e-9, momentum=0.0,
-                        grad_clip_max_amp=float("inf"), preconditioner_update_probability=1.0, whiten_grad=True):
+                        lr_params=0.001, lr_preconditioner=0.1, betaL=0.9, damping=1e-9, momentum=0.0, grad_clip_max_amps=(2.0, 10.0), 
+                        preconditioner_update_probability=1.0, update_preconditioner_first=True, whiten_grad=True):
         # mutable members
         self.lr_params = lr_params
         self.lr_preconditioner = lr_preconditioner
         self.betaL = betaL  # set to a large betaL for sparse gradients 
         self.damping = damping # to damp and upper bound P as P < eye/damping
         self.momentum = momentum if (0<momentum<1) else 0.0
-        self.grad_clip_max_amp = grad_clip_max_amp
+        self.grad_clip_max_amps = grad_clip_max_amps
         self.preconditioner_update_probability = preconditioner_update_probability
+        self.update_preconditioner_first = update_preconditioner_first # True for biased update; False for unbiased update.
         # protected members
         params_with_grad = [params_with_grad,] if isinstance(params_with_grad, torch.Tensor) else params_with_grad
         self._params_with_grad = [param for param in params_with_grad if param.requires_grad] # double check requires_grad flag
@@ -1119,7 +1142,12 @@ class LRAWhiten:
         else: # clear the momentum buffer and counter when momentum is set to zero
             self._m, self._counter_m = None, 0 
 
-        if torch.rand([]) < self.preconditioner_update_probability: # update preconditioner 
+        if torch.rand([]) < self.preconditioner_update_probability:
+            update_preconditioner_first, update_preconditioner_last = self.update_preconditioner_first, not self.update_preconditioner_first
+        else:
+            update_preconditioner_first, update_preconditioner_last = False, False
+
+        if update_preconditioner_first: # update preconditioner first 
             if self._whiten_grad: # whitens gradient 
                 update_precond_lra_whiten(self._UVd, self._Luvd, grad, lr=self.lr_preconditioner, betaL=self.betaL, damping=self.damping)
             else: # whitens momentum 
@@ -1129,15 +1157,21 @@ class LRAWhiten:
             pre_grad = precond_grad_lra(self._UVd, self._m)
         else: # precondition gradient 
             pre_grad = precond_grad_lra(self._UVd, grad)
+
+        if update_preconditioner_last: # update preconditioner later 
+            if self._whiten_grad: # whitens gradient 
+                update_precond_lra_whiten(self._UVd, self._Luvd, grad, lr=self.lr_preconditioner, betaL=self.betaL, damping=self.damping)
+            else: # whitens momentum 
+                update_precond_lra_whiten(self._UVd, self._Luvd, self._m, lr=self.lr_preconditioner, betaL=self.betaL, damping=self.damping)
             
-        lr = self.lr_params
-        if self.grad_clip_max_amp < float("inf"): # clip preconditioned gradient 
-            amp = torch.sqrt(torch.mean(pre_grad * pre_grad))
-            if amp > self.grad_clip_max_amp:
-                lr = lr * self.grad_clip_max_amp/amp 
+        max_avg_amp, max_element_amp = self.grad_clip_max_amps
+        avg_amp = torch.sqrt(torch.mean(pre_grad * pre_grad))
+        if avg_amp > max_avg_amp:
+            pre_grad *= max_avg_amp/avg_amp
+        pre_grad.clamp(min=-max_element_amp, max=max_element_amp)
             
         # update the parameters 
-        [param.subtract_(lr * pre_grad[j - i:j].view_as(param)) 
+        [param.subtract_(pre_grad[j - i:j].view_as(param), alpha=self.lr_params) 
          for (param, i, j) in zip(self._params_with_grad, self._param_sizes, self._param_cumsizes)]
         
         # return whatever closure returns

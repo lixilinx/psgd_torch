@@ -52,7 +52,7 @@ class Model(torch.nn.Module):
 
 model = Model().to(device)
 opt = psgd.KronWhiten(model.parameters(), preconditioner_init_scale=1.0, 
-                      lr_params=1e-3, lr_preconditioner=0.01, grad_clip_max_amp=1.0)
+                      lr_params=1e-3, lr_preconditioner=0.01)
 
 def train_loss(xy_pair):  # logistic loss
     return -torch.mean(torch.log(torch.sigmoid(xy_pair[1] * model(xy_pair[0]))))
