@@ -261,7 +261,6 @@ for resample in [False, True]:
         lenet5.parameters(),
         preconditioner_max_skew=float("inf"),
         preconditioner_init_scale=1.0,
-        grad_clip_max_amp=1.0,
     )
     
     TrainLosses, best_test_loss = [], 1.0

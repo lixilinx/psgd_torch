@@ -408,7 +408,6 @@ opt = psgd.KronWhiten(
     preconditioner_max_skew=2,
     momentum=0.9,
     lr_params=1e-3/4, # reduce adam lr by sqrt((1 + 0.9)/(1 - 0.9)) times with momentum 0.9
-    grad_clip_max_amp=1.0,
     whiten_grad=False,
     preconditioner_update_probability=1.0, # anneal to 0.01
 )
