@@ -25,7 +25,7 @@ class WhitenMomentumNS4(torch.optim.Optimizer):
             preconditioner_update_probability=1.0, # quickly anneal to 0.01 ~ 0.1 to save computations 
             preconditioner_dtype:torch.dtype|None=torch.bfloat16, # bf16 should be good enough for most problems
             update_preconditioner_first=True, # True for biased updates; False for unbiased updates. 
-            resync_every=1000_000, # resync every # steps if states divergence too much due to nondeterminstic matmul; NOT implemented and generally no need   
+            resync_every=1000_000, # resync every # steps if states divergence too much due to nondeterministic matmul; NOT implemented and generally no need   
     ):
         defaults = {
             "preconditioner_max_size": preconditioner_max_size, 
@@ -92,7 +92,7 @@ class WhitenMomentumNS4(torch.optim.Optimizer):
                     grad = grad.squeeze()
 
                 state = self.state[p]
-                if len(state) == 0: # intialization
+                if len(state) == 0: # initialization
                     state["QL"], state["exprs"] = psgd.init_kron(grad, 
                                                                  Scale=group["preconditioner_init_scale"], 
                                                                  max_size=group["preconditioner_max_size"], 
@@ -119,7 +119,7 @@ class WhitenMomentumNS4(torch.optim.Optimizer):
                 avg_amp = torch.sqrt(torch.mean(h*h))
                 if avg_amp > max_avg_amp:
                     h *= max_avg_amp/avg_amp
-                h.clamp(min=-max_element_amp, max=max_element_amp) 
+                h.clamp_(min=-max_element_amp, max=max_element_amp) 
                 local_p = p.to_local()
                 local_p.subtract_(h.view_as(local_p), alpha=group["lr_params"])
 
@@ -127,7 +127,7 @@ class WhitenMomentumNS4(torch.optim.Optimizer):
                     self.update_precond(state["QL"], state["exprs"], g, 
                                         lr=group["lr_preconditioner"], betaL=group["betaL"], damping=group["damping"])
 
-                # resync states occasionally if matmul is not determinstic and divergence of replicated state is large 
+                # resync states occasionally if matmul is not deterministic and divergence of replicated state is large 
                 if state["step"] % group["resync_every"] == 0:
                     pass # check p.device_mesh and p.placements for subgroups with duplicated states and resync them as in DDP wrapping     
 
@@ -177,6 +177,9 @@ if __name__ == "__main__":
     # pairs with the same local weights and preconditioner: (rank 0, rank 2) and (rank 1, rank 3). 
     # pairs with different local weights and preconditioner: (rank 0, rank 1) and (rank 2, rank 3).
     # full weights should be the same for all ranks.    
-    print(f"rank {rank} got loss {loss}") # different GPU should have different loss 
+    print(f"rank {rank} got loss {loss}") # different GPU may have different loss 
     print(f"rank {rank} got local model weights {model.w.to_local()}") 
     print(f"rank {rank} got full model weights {model.w.full_tensor()}") 
+
+    torch.distributed.destroy_process_group()
+    

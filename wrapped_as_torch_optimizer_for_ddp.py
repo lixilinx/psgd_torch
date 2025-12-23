@@ -24,7 +24,7 @@ class WhitenMomentumNS4(torch.optim.Optimizer):
             preconditioner_update_probability=1.0, # quickly anneal to 0.01 ~ 0.1 to save computations  
             preconditioner_dtype:torch.dtype|None=torch.bfloat16, # bf16 should be good enough for most problems
             update_preconditioner_first=True, # True for biased updates; False for unbiased updates. 
-            resync_every=1000_000, # resync every # steps if nondeterminstic matmul diverges states too much; generally no need to resync   
+            resync_every=1000_000, # resync every # steps if nondeterministic matmul diverges states too much; generally no need to resync   
     ):
         defaults = {
             "preconditioner_max_size": preconditioner_max_size, 
@@ -90,7 +90,7 @@ class WhitenMomentumNS4(torch.optim.Optimizer):
                     grad = grad.squeeze()
 
                 state = self.state[p]
-                if len(state) == 0: # intialization
+                if len(state) == 0: # initialization
                     state["QL"], state["exprs"] = psgd.init_kron(grad, 
                                                                  Scale=group["preconditioner_init_scale"], 
                                                                  max_size=group["preconditioner_max_size"], 
@@ -117,14 +117,14 @@ class WhitenMomentumNS4(torch.optim.Optimizer):
                 avg_amp = torch.sqrt(torch.mean(h*h))
                 if avg_amp > max_avg_amp:
                     h *= max_avg_amp/avg_amp
-                h.clamp(min=-max_element_amp, max=max_element_amp) 
+                h.clamp_(min=-max_element_amp, max=max_element_amp) 
                 p.subtract_(h.view_as(p), alpha=group["lr_params"])
 
                 if update_preconditioner_last: # update P after applying on g; unbiased 
                     self.update_precond(state["QL"], state["exprs"], g, 
                                         lr=group["lr_preconditioner"], betaL=group["betaL"], damping=group["damping"])
 
-                # resync states occasionally if matmul is not determinstic and state divergence is large 
+                # resync states occasionally if matmul is not deterministic and state divergence is large 
                 if self.is_distributed and (state["step"] % group["resync_every"] == 0):
                     torch.distributed.broadcast(p, src=0)
                     if momentum > 0.0:
@@ -171,6 +171,9 @@ if __name__ == "__main__":
         opt.step()
 
     # let's verify the wrapping  
-    print(f"rank {rank} got loss {loss}") # different GPU should have different loss 
+    print(f"rank {rank} got loss {loss}") # different GPU may have different loss 
     print(f"rank {rank} got model weights {model.module.w}") # model weights should be close (no bitwise match guarantee in general)
     print(f"""rank {rank} got preconditioner states {opt.state[model.module.w]["QL"]}""") # close but no bitwise match guarantee
+
+    torch.distributed.destroy_process_group()
+    

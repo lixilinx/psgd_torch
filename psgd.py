@@ -30,6 +30,11 @@ We also keep the PSGD dense matrix Newton-type preconditioner here to illustrate
 It supports all the five methods for updating Q, 
 and can be a good alternative to the BFGS like quasi-Newton optimizers as no line search is required. 
 
+Please refer to 
+    https://github.com/lixilinx/psgd_torch/blob/master/wrapped_as_torch_optimizer_for_ddp.py
+    https://github.com/lixilinx/psgd_torch/blob/master/wrapped_as_torch_optimizer_for_dtensor.py
+for torch.optim optimizer wrappings for DDP, FSDP, FP, etc. trainings and typical settings. 
+
 Xi-Lin Li, lixilinx@gmail.com; last updated in Oct., 2025. 
 Main refs: https://arxiv.org/abs/1512.04202; https://arxiv.org/abs/2402.11858. 
 """
@@ -641,7 +646,7 @@ class KronWhiten:
             if torch.is_complex(g):
                 g /= torch.clamp(torch.abs(g)/max_element_amp, min=1.0) 
             else:
-                g.clamp(min=-max_element_amp, max=max_element_amp)
+                g.clamp_(min=-max_element_amp, max=max_element_amp)
             param.subtract_(g.view_as(param), alpha=self.lr_params)
 
         # return whatever closure returns
@@ -1168,7 +1173,7 @@ class LRAWhiten:
         avg_amp = torch.sqrt(torch.mean(pre_grad * pre_grad))
         if avg_amp > max_avg_amp:
             pre_grad *= max_avg_amp/avg_amp
-        pre_grad.clamp(min=-max_element_amp, max=max_element_amp)
+        pre_grad.clamp_(min=-max_element_amp, max=max_element_amp)
             
         # update the parameters 
         [param.subtract_(pre_grad[j - i:j].view_as(param), alpha=self.lr_params) 
