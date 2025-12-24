@@ -14,7 +14,7 @@ class WhitenMomentumNS4(torch.optim.Optimizer):
             preconditioner_max_size=float("inf"), 
             preconditioner_max_skew=1.0, # 0.0 => all diagonal Q; inf => all dense Q
             preconditioner_init_scale=1.0, # P0 = preconditioner_init_scale^2 * I; set to small value for warmup 
-            lr_params=3e-4, # roughly sqrt((1-momentum)/(1+momentum)) * 1e-3    
+            lr_params=2e-4, # sqrt((1-momentum)/(1+momentum)) * 1e-3 is a good starting point    
             lr_preconditioner=0.5, # don't anneal to < 0.1 for bfloat16 preconditioner as eps(bf16) ~ 0.01    
             betaL=0.9, 
             damping=1e-9, # roughly the eps=1e-8 in Adam 
@@ -54,7 +54,7 @@ class WhitenMomentumNS4(torch.optim.Optimizer):
             torch.distributed.broadcast(state, src=0)
             self.cpu_rng_state = state.cpu()
 
-            state = torch.cuda.get_rng_state().cuda()
+            state = torch.cuda.get_rng_state().cuda() # assume nccl backend 
             torch.distributed.broadcast(state, src=0)
             self.cuda_rng_state = state.cpu()
 
@@ -83,11 +83,10 @@ class WhitenMomentumNS4(torch.optim.Optimizer):
                 if wd > 0.0: # here is the classic wd; just p.mul_(1 - wd * lr_params) for decoupled wd
                     grad = grad.add(p, alpha=wd)
 
+                grad = grad.squeeze() # squeeze out singleton dims; also good to merge small dims if possible
                 preconditioner_dtype = group["preconditioner_dtype"]
                 if preconditioner_dtype:
-                    grad = grad.squeeze().to(preconditioner_dtype) # squeeze out dim=1; also good to merge small dims if possible
-                else:
-                    grad = grad.squeeze()
+                    grad = grad.to(preconditioner_dtype) 
 
                 state = self.state[p]
                 if len(state) == 0: # initialization
@@ -173,7 +172,7 @@ if __name__ == "__main__":
     # let's verify the wrapping  
     print(f"rank {rank} got loss {loss}") # different GPU may have different loss 
     print(f"rank {rank} got model weights {model.module.w}") # model weights should be close (no bitwise match guarantee in general)
-    print(f"""rank {rank} got preconditioner states {opt.state[model.module.w]["QL"]}""") # close but no bitwise match guarantee
+    print(f"rank {rank} got preconditioner states {opt.state[model.module.w]['QL']}") # close but no bitwise match guarantee
 
     torch.distributed.destroy_process_group()
     

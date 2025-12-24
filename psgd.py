@@ -13,7 +13,7 @@ The new PSGD-Kron Newton/Whitening preconditioners support five kinds of local c
 
     EQ): dQ = mathcal{E} * Q
     This choice recovers the old PSGD way for updating Q in Lie groups (Q is triangular). 
-    Its main drawback is that triangualr solvers are required for updating Q.  
+    Its main drawback is that triangular solvers are required for updating Q.  
 
     QEP): dQ = Q * mathcal{E} * P
     This last choice works very well if it does. Q is in the general linear group.  
@@ -48,7 +48,7 @@ def norm_lower_bound_spd(A, k=32, half_iters=2):
     Returns a cheap lower bound for the spectral norm of a symmetric positive definite matrix A, where,
         k: the dim of subspace, suggesting 128 for bfloat16 and 32 for float32 (tested on my laptop 4070 GPU);
         half_iters: half of the number of subspace iterations, suggesting 2.  
-    A rough norm estimation with bfloat16 is good enough, and we don't orthonormaliz the subspace vectors. 
+    A rough norm estimation with bfloat16 is good enough, and we don't orthonormalize the subspace vectors. 
 
     The initial noise space V is rotated such that its centroid aligns with the largest row of A. 
     Hence, each row of V and the largest row of A has an angle about acos(1/sqrt(k)) when k << dim(A). 
@@ -73,7 +73,7 @@ def norm_lower_bound_skh(A, k=32, half_iters=2):
     Returns a cheap lower bound for the spectral norm of a skew-Hermitian matrix A,
         k: the dim of subspace, suggesting 128 for bfloat16 and 32 for float32 (tested on my laptop 4070 GPU);
         half_iters: half of the number of subspace iterations, suggesting 2.  
-    A rough norm estimation with bfloat16 is good enough, and we don't orthonormaliz the subspace vectors. 
+    A rough norm estimation with bfloat16 is good enough, and we don't orthonormalize the subspace vectors. 
 
     The initial noise space V is rotated such that its centroid aligns with the largest row of A. 
     Hence, each row of V and the largest row of A has an angle about acos(1/sqrt(k)) when k << dim(A). 
@@ -104,9 +104,9 @@ def procrustes_step2(Q, max_step_size=1/8):
         min_U || U Q - I ||_F,   s.t. U^H U = I
     by rotating Q as exp(a R) Q, where R = Q^H - Q is the generator and ||a R|| < 1. 
 
-    We expand exp(a R) to its 2nd term as 
-        I + aR + (aR)^2/2
-    and the truncation error is upper bounded as ||a R||^4/4. 
+    We expand U = exp(a R) to its 2nd term as 
+        U ~ I + aR + (aR)^2/2
+    and the truncation error ||U^H U - I|| is upper bounded as ||a R||^4/4. 
     Set max_step_size <= 1/4 such that the truncation error <= (1/4)^4/4 < 1e-3.  
 
     Note that U(n) is connected and such rotations can make almost any complex Q SPD except for convergence to saddle points. 
@@ -118,7 +118,7 @@ def procrustes_step2(Q, max_step_size=1/8):
     R /= norm_lower_bound_skh(R) + torch.finfo(R.dtype).smallest_normal # normalize R as typically it's too small 
     RQ = R @ Q
     RRQ = R @ RQ
-    tr_RQ = RQ.diagonal().real.sum() # tr_RQ >=0 by theory; torch.trace not implemented for CPU bfloat16, so sum(diag())
+    tr_RQ = RQ.diagonal().real.sum() # tr_RQ >=0 by theory; torch.trace not implemented for CPU bfloat16, so using sum(diag(.)) here
     tr_RRQ = RRQ.diagonal().real.sum() # line search is needed if tr_RRQ < 0
     a = torch.where(tr_RRQ < 0, torch.clamp(-tr_RQ / tr_RRQ, max=max_step_size), max_step_size)
     Q.add_(a * (RQ + 0.5 * a * RRQ))
@@ -130,9 +130,9 @@ def procrustes_step3(Q, max_step_size=1/3):
         min_U || U Q - I ||_F,   s.t. U^H U = I
     by rotating Q as exp(a R) Q, where R = Q^H - Q is the generator and ||a R|| < 1. 
 
-    We expand exp(a R) to its 3rd term as 
-        I + aR + (aR)^2/2 + (aR)^3/8 
-    and the truncation error is upper bounded as ||a R||^6/64. 
+    We expand U = exp(a R) to its 3rd term as (not the same as the Taylor series of U)
+        U ~ I + aR + (aR)^2/2 + (aR)^3/8 
+    and the truncation error ||U^H U - I|| is upper bounded as ||a R||^6/64. 
     Set max_step_size <= 5/8 such that the truncation error <= (5/8)^6/64 < 1e-3.  
 
     Note that U(n) is connected and such rotations can make almost any complex Q SPD except for convergence to saddle points. 
@@ -143,7 +143,7 @@ def procrustes_step3(Q, max_step_size=1/3):
     RQ = R @ Q
     RRQ = R @ RQ
     RRRQ = R @ RRQ 
-    tr_RQ = RQ.diagonal().real.sum() # tr_RQ >=0 by theory; torch.trace not implemented for CPU bfloat16, so sum(diag())
+    tr_RQ = RQ.diagonal().real.sum() # tr_RQ >=0 by theory; torch.trace not implemented for CPU bfloat16, so using sum(diag(.)) here
     tr_RRQ = RRQ.diagonal().real.sum() 
     tr_RRRQ = RRRQ.diagonal().real.sum() # tr_RRRQ <=0 
     if tr_RQ > 0 and tr_RRRQ < 0: # otherwise, Q^T = Q up to machine precision 
@@ -169,7 +169,7 @@ def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0, dQ="Q0.5EQ1.5")
        
        The Lipschitz smoothness constant L for Q is initialized to zero. 
        
-    2, A series of enisum contract expressions. The following subscript examples are for a 5th order tensor.  
+    2, A series of einsum contract expressions. The following subscript examples are for a 5th order tensor.  
         2.1, exprP is the expression for applying the Preconditioner on the gradient, e.g.,
                 'aA,bB,cC,dD,eE,aα,bβ,cγ,dδ,eε,αβγδε->ABCDE'
         2.2, the i-th expression of exprGs is for the contraction of two tensors that only keeps the i-th dim, e.g.,
@@ -446,7 +446,7 @@ def update_precond_kron_whiten_pro4p(QL, exprs, G, lr=0.1, betaL=0.9, damping=1e
             for _ in range(10):
                 procrustes_step3(q)
                 if (q.H - q).abs().amax() < 0.001 * q.abs().amax():
-                    break # q is almost SPD 
+                    break # q is almost Hermitian 
             
     if torch.rand([]) < 0.01: # balance factors of P
         balance_kron_precond(Q)
@@ -546,7 +546,7 @@ class KronWhiten:
         self.momentum = momentum if (0<momentum<1) else 0.0
         self.grad_clip_max_amps = grad_clip_max_amps # clip grad with thresholds (max average amplitude, max element-wise amplitude) 
         self.preconditioner_update_probability = preconditioner_update_probability
-        self.update_preconditioner_first = update_preconditioner_first, # True for biased update; False for unbiased update.
+        self.update_preconditioner_first = update_preconditioner_first # True for biased update; False for unbiased update.
         # protected members
         self._preconditioner_max_size = preconditioner_max_size
         self._preconditioner_max_skew = preconditioner_max_skew
@@ -560,8 +560,8 @@ class KronWhiten:
         self._ms, self._counter_m = None, 0 # momentum buffers and counter  
         self._whiten_grad = whiten_grad # set to False to whiten momentum.  
         if not whiten_grad:
-            assert self.momentum > 0, "Cannot whiten momentum if the momentum setting is zero."
-            print(f"Recommend to reduce lr_params by {int(((1 + momentum)/(1 - momentum))**0.5)} times")
+            assert self.momentum > 0, "Cannot whiten momentum if the momentum setting is invalid."
+            print(f"Recommend reducing the lr_params for gradient whitening by a factor of {((1 + self.momentum)/(1 - self.momentum))**0.5} for this momentum whitening setting.")
         self._dQ = dQ
         if dQ in {"QUAD4P", "PRO4P"}: # the only two cases that we fit P directly 
             if max([torch.finfo(p.dtype).eps for p in self._params_with_grad]) > 1e-6:
@@ -607,7 +607,8 @@ class KronWhiten:
             if self._ms is None:
                 self._ms = [torch.zeros_like(g) for g in grads]
 
-            [m.mul_(beta).add_(g, alpha=1 - beta) for (m, g) in zip(self._ms, grads)]
+            for (m, g) in zip(self._ms, grads):
+                m.mul_(beta).add_(g, alpha=1 - beta)
         else:
             self._ms, self._counter_m = None, 0
 
@@ -618,11 +619,11 @@ class KronWhiten:
 
         if update_preconditioner_first: # update Q
             if self._whiten_grad: # Q whitens gradient 
-                [self._update_precond(*QL_exprs, g, lr=self.lr_preconditioner, betaL=self.betaL, damping=self.damping) 
-                 for (QL_exprs, g) in zip(self._QLs_exprs, grads)]
+                for (QL_exprs, g) in zip(self._QLs_exprs, grads):
+                    self._update_precond(*QL_exprs, g, lr=self.lr_preconditioner, betaL=self.betaL, damping=self.damping)
             else: # Q whitens momentum 
-                [self._update_precond(*QL_exprs, m, lr=self.lr_preconditioner, betaL=self.betaL, damping=self.damping) 
-                 for (QL_exprs, m) in zip(self._QLs_exprs, self._ms)]
+                for (QL_exprs, m) in zip(self._QLs_exprs, self._ms):
+                    self._update_precond(*QL_exprs, m, lr=self.lr_preconditioner, betaL=self.betaL, damping=self.damping)
                 
         if self.momentum > 0: # precondition momentum 
             pre_grads = [self._precond_grad(*QL_exprs, m) for (QL_exprs, m) in zip(self._QLs_exprs, self._ms)]
@@ -631,11 +632,11 @@ class KronWhiten:
 
         if update_preconditioner_last: # update Q
             if self._whiten_grad: # Q whitens gradient 
-                [self._update_precond(*QL_exprs, g, lr=self.lr_preconditioner, betaL=self.betaL, damping=self.damping) 
-                 for (QL_exprs, g) in zip(self._QLs_exprs, grads)]
+                for (QL_exprs, g) in zip(self._QLs_exprs, grads):
+                    self._update_precond(*QL_exprs, g, lr=self.lr_preconditioner, betaL=self.betaL, damping=self.damping)
             else: # Q whitens momentum 
-                [self._update_precond(*QL_exprs, m, lr=self.lr_preconditioner, betaL=self.betaL, damping=self.damping) 
-                 for (QL_exprs, m) in zip(self._QLs_exprs, self._ms)]
+                for (QL_exprs, m) in zip(self._QLs_exprs, self._ms):
+                    self._update_precond(*QL_exprs, m, lr=self.lr_preconditioner, betaL=self.betaL, damping=self.damping)
             
         # Update the parameters after clipping the preconditioned gradient per tensor 
         max_avg_amp, max_element_amp = self.grad_clip_max_amps 
@@ -926,21 +927,23 @@ class KronNewton:
                     grads = torch.autograd.grad(loss, self._params_with_grad)
                     
                 vs = [torch.randn_like(p) for p in self._params_with_grad]
-                [p.add_(v, alpha=self._delta_param_scale) for (p, v) in zip(self._params_with_grad, vs)]
+                for (p, v) in zip(self._params_with_grad, vs): # add perturbation 
+                    p.add_(v, alpha=self._delta_param_scale)
                 with torch.enable_grad():
                     perturbed_returns = closure()
                     perturbed_loss = perturbed_returns if isinstance(perturbed_returns, torch.Tensor) else perturbed_returns[0]
                     perturbed_grads = torch.autograd.grad(perturbed_loss, self._params_with_grad)
-                Hvs = [(perturbed_g - g)/self._delta_param_scale for (perturbed_g, g) in zip(perturbed_grads, grads)]               
-                [p.sub_(v, alpha=self._delta_param_scale) for (p, v) in zip(self._params_with_grad, vs)] # remove the perturbation            
+                Hvs = [(perturbed_g - g)/self._delta_param_scale for (perturbed_g, g) in zip(perturbed_grads, grads)] 
+                for (p, v) in zip(self._params_with_grad, vs): # remove the perturbation 
+                    p.sub_(v, alpha=self._delta_param_scale)             
             
             if self._QLs_exprs is None: # initialize QLs on the fly if it is None 
                 scale = (sum([torch.sum(torch.abs(v)**2) for v in vs])/sum([v.numel() for v in vs])) ** (1/4) # (mean(|v|^2))^(1/4)
                 scale = scale * (max([torch.mean((torch.abs(h))**4) for h in Hvs]) + self.damping**4) ** (-1/8) # (mean(|v|^2))^(1/4) * (mean(|h|^4))^(-1/8)
                 self._QLs_exprs = [init_kron(h.squeeze(), scale, self._preconditioner_max_size, self._preconditioner_max_skew, self._dQ) for h in Hvs]
             # update preconditioner
-            [self._update_precond(*QL_exprs, v.squeeze(), h.squeeze(), lr=self.lr_preconditioner, betaL=self.betaL, damping=self.damping) 
-             for (QL_exprs, v, h) in zip(self._QLs_exprs, vs, Hvs)]
+            for (QL_exprs, v, h) in zip(self._QLs_exprs, vs, Hvs):
+                self._update_precond(*QL_exprs, v.squeeze(), h.squeeze(), lr=self.lr_preconditioner, betaL=self.betaL, damping=self.damping)
         else: # only evaluate the gradients
             with torch.enable_grad():
                 closure_returns = closure()
@@ -954,7 +957,8 @@ class KronNewton:
             if self._ms is None:
                 self._ms = [torch.zeros_like(g) for g in grads]
                 
-            [m.mul_(beta).add_(g, alpha=1 - beta) for (m, g) in zip(self._ms, grads)]
+            for (m, g) in zip(self._ms, grads):
+                m.mul_(beta).add_(g, alpha=1 - beta)
             pre_grads = [self._precond_grad(*QL_exprs, m) for (QL_exprs, m) in zip(self._QLs_exprs, self._ms)]
         else: # precondition the gradient 
             self._ms, self._counter_m = None, 0 # clear the buffer and counter when momentum is set to zero 
@@ -966,8 +970,9 @@ class KronNewton:
             if grad_norm > self.grad_clip_max_norm:
                 lr = lr * self.grad_clip_max_norm / grad_norm
             
-        # Update the parameters. 
-        [param.subtract_(lr*g.view_as(param)) for (param, g) in zip(self._params_with_grad, pre_grads)]
+        # Update the parameters
+        for (param, g) in zip(self._params_with_grad, pre_grads):
+            param.subtract_(lr*g.view_as(param))
         
         # return whatever closure returns
         return closure_returns
@@ -989,7 +994,7 @@ def IpUVtmatvec(U, V, x):
 def update_precond_lra(UVd, Luvd, v, h, lr=0.1, betaL=0.9):
     """
     The raw function for updating the LRA preconditioner Q = (I + U*V')*diag(d) with pair (v, h), 
-    where h can a Hvp associated with v, or a gradient/momentum independent of v.
+    where h can be a Hvp associated with v, or a gradient/momentum independent of v.
     State variables (U, V, d) and their Lipschitz smoothness constant estimates (Lu, Lv, Ld) are updated inplace. 
     Damping logic is not implemented here.                  
     Note that U, V, d, v, and h all are either matrices or column vectors.  
@@ -1004,8 +1009,10 @@ def update_precond_lra(UVd, Luvd, v, h, lr=0.1, betaL=0.9):
     rho2 = rho * rho
     E = 0.1 * (UtU/rho2 - VtV*rho2)/(trUtU/rho2 + trVtV*rho2) # errors after scaling U and V  
     E2 = 0.5 * E @ E # using this E2 term to make (I - E + E^2/2)(I + E + E^2/2) = (I + E^2/2)^2 - E^2 = I + E^4/4 
-    U.div_(rho), V.mul_(rho) # scale U and V to have ||U||_F = ||V||_F
-    U.sub_(U @ (E - E2)), V.add_(V @ (E + E2)) # rotate (as tr(E)=0) U and V to approach U^TU = V^TV
+    U.div_(rho) # scale U and V to have ||U||_F = ||V||_F
+    V.mul_(rho) 
+    U.sub_(U @ (E - E2)) # rotate (as tr(E)=0) U and V to approach U^TU = V^TV
+    V.add_(V @ (E + E2)) 
 
     Qh = IpUVtmatvec(U, V, d * h)
     Ph = d*IpUVtmatvec(V, U, Qh)
@@ -1034,7 +1041,7 @@ def update_precond_lra(UVd, Luvd, v, h, lr=0.1, betaL=0.9):
                torch.linalg.vector_norm(b)*torch.linalg.vector_norm(btVVt))
         Lu.copy_(torch.max(betaL*Lu + (1 - betaL)*ell, ell))
         U.sub_(lr/Lu * ( a.mm(atV.mm(IpVtU)) - b.mm(btV.mm(IpVtU)) ))
-    else: # only udate V
+    else: # only update V
         atU = a.t().mm(U)
         btU = b.t().mm(U)
         UUta = U.mm(atU.t())
@@ -1117,8 +1124,8 @@ class LRAWhiten:
         self._m, self._counter_m = None, 0 # momentum buffer and counter 
         self._whiten_grad = whiten_grad
         if (not whiten_grad):
-            assert self.momentum > 0, "Cannot whiten momentum if the momentum setting is zero."
-            print(f"Recommend to reduce lr_params by {int(((1 + momentum)/(1 - momentum))**0.5)} times")
+            assert self.momentum > 0, "Cannot whiten momentum if the momentum setting is invalid."
+            print(f"Recommend reducing the lr_params for gradient whitening by a factor of {((1 + self.momentum)/(1 - self.momentum))**0.5} for this momentum whitening setting.")
 
 
     @torch.no_grad()
@@ -1131,7 +1138,7 @@ class LRAWhiten:
             loss = closure_returns if isinstance(closure_returns, torch.Tensor) else closure_returns[0]
             grads = torch.autograd.grad(loss, self._params_with_grad)
 
-        # cat grads
+        # cat grads into a single vector 
         grad = torch.cat([torch.reshape(g, [-1, 1]) for g in grads]) # column vector 
         
         if len(self._UVd) < 3: # initialize d on the fly 
@@ -1176,8 +1183,8 @@ class LRAWhiten:
         pre_grad.clamp_(min=-max_element_amp, max=max_element_amp)
             
         # update the parameters 
-        [param.subtract_(pre_grad[j - i:j].view_as(param), alpha=self.lr_params) 
-         for (param, i, j) in zip(self._params_with_grad, self._param_sizes, self._param_cumsizes)]
+        for (param, i, j) in zip(self._params_with_grad, self._param_sizes, self._param_cumsizes):
+            param.subtract_(pre_grad[j - i:j].view_as(param), alpha=self.lr_params) 
         
         # return whatever closure returns
         return closure_returns
@@ -1271,13 +1278,15 @@ class LRANewton:
                     grads = torch.autograd.grad(loss, self._params_with_grad)
                 
                 vs = [torch.randn_like(param) for param in self._params_with_grad]
-                [param.add_(v, alpha=self._delta_param_scale) for (param, v) in zip(self._params_with_grad, vs)]
+                for (param, v) in zip(self._params_with_grad, vs):
+                    param.add_(v, alpha=self._delta_param_scale)
                 with torch.enable_grad():
                     perturbed_returns = closure()
                     perturbed_loss = perturbed_returns if isinstance(perturbed_returns, torch.Tensor) else perturbed_returns[0]
                     perturbed_grads = torch.autograd.grad(perturbed_loss, self._params_with_grad)
                 Hvs = [(perturbed_g - g)/self._delta_param_scale for (perturbed_g, g) in zip(perturbed_grads, grads)]
-                [param.sub_(v, alpha=self._delta_param_scale) for (param, v) in zip(self._params_with_grad, vs)]
+                for (param, v) in zip(self._params_with_grad, vs):
+                    param.sub_(v, alpha=self._delta_param_scale)
 
             v = torch.cat([torch.reshape(v, [-1, 1]) for v in vs]) # column vector
             h = torch.cat([torch.reshape(h, [-1, 1]) for h in Hvs]) # column vector  
@@ -1314,8 +1323,8 @@ class LRANewton:
                 lr = lr * self.grad_clip_max_norm / grad_norm
             
         # update the parameters
-        [param.subtract_(lr * pre_grad[j - i:j].view_as(param)) 
-         for (param, i, j) in zip(self._params_with_grad, self._param_sizes, self._param_cumsizes)]
+        for (param, i, j) in zip(self._params_with_grad, self._param_sizes, self._param_cumsizes):
+            param.subtract_(lr * pre_grad[j - i:j].view_as(param)) 
         
         # return whatever closure returns
         return closure_returns
@@ -1464,7 +1473,7 @@ class DenseNewton:
             self._precond_grad = lambda Q, g: Q @ g
         elif dQ == "QUAD":
             self._update_precond = update_precond_dense_quad
-            self._precond_grad = lambda Q, g: Q @ (Q @ g) # Q is symmetric; just save one transpose 
+            self._precond_grad = lambda Q, g: Q @ (Q @ g) # Q is symmetric here; so Q^T = Q 
         else:
             self._precond_grad = lambda Q, g: Q.T @ (Q @ g)
             if dQ == "QEP":
@@ -1499,13 +1508,15 @@ class DenseNewton:
                     grads = torch.autograd.grad(loss, self._params_with_grad)
                 
                 vs = [torch.randn_like(param) for param in self._params_with_grad]
-                [param.add_(v, alpha=self._delta_param_scale) for (param, v) in zip(self._params_with_grad, vs)]
+                for (param, v) in zip(self._params_with_grad, vs):
+                    param.add_(v, alpha=self._delta_param_scale)
                 with torch.enable_grad():
                     perturbed_returns = closure()
                     perturbed_loss = perturbed_returns if isinstance(perturbed_returns, torch.Tensor) else perturbed_returns[0]
                     perturbed_grads = torch.autograd.grad(perturbed_loss, self._params_with_grad)
                 Hvs = [(perturbed_g - g)/self._delta_param_scale for (perturbed_g, g) in zip(perturbed_grads, grads)]
-                [param.sub_(v, alpha=self._delta_param_scale) for (param, v) in zip(self._params_with_grad, vs)]
+                for (param, v) in zip(self._params_with_grad, vs):
+                    param.sub_(v, alpha=self._delta_param_scale)
 
             v = torch.cat([torch.reshape(v, [-1, 1]) for v in vs]) 
             h = torch.cat([torch.reshape(h, [-1, 1]) for h in Hvs]) 
@@ -1545,8 +1556,8 @@ class DenseNewton:
                 lr = lr * self.grad_clip_max_norm / grad_norm
 
         # update the parameters
-        [param.subtract_(lr * pre_grad[j - i:j].view_as(param)) 
-         for (param, i, j) in zip(self._params_with_grad, self._param_sizes, self._param_cumsizes)]
+        for (param, i, j) in zip(self._params_with_grad, self._param_sizes, self._param_cumsizes):
+            param.subtract_(lr * pre_grad[j - i:j].view_as(param))
         
         # return whatever closure returns
         return closure_returns

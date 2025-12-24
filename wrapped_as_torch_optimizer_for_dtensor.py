@@ -15,7 +15,7 @@ class WhitenMomentumNS4(torch.optim.Optimizer):
             preconditioner_max_size=float("inf"), 
             preconditioner_max_skew=1.0, # 0.0 => all diagonal Q; inf => all dense Q
             preconditioner_init_scale=1.0, # P0 = preconditioner_init_scale^2 * I; set to small value for warmup
-            lr_params=3e-4, # roughly sqrt((1-momentum)/(1+momentum)) * 1e-3   
+            lr_params=2e-4, # sqrt((1-momentum)/(1+momentum)) * 1e-3 is a good starting point   
             lr_preconditioner=0.5, # don't anneal to < 0.1 for bfloat16 preconditioner as eps(bf16) ~ 0.01    
             betaL=0.9, 
             damping=1e-9, # roughly the eps=1e-8 in Adam 
@@ -54,7 +54,7 @@ class WhitenMomentumNS4(torch.optim.Optimizer):
         torch.distributed.broadcast(state, src=0)
         self.cpu_rng_state = state.cpu()
 
-        state = torch.cuda.get_rng_state().cuda()
+        state = torch.cuda.get_rng_state().cuda() # assume nccl backend 
         torch.distributed.broadcast(state, src=0)
         self.cuda_rng_state = state.cpu()
 
@@ -81,15 +81,14 @@ class WhitenMomentumNS4(torch.optim.Optimizer):
                 if wd > 0.0: # here is the classic wd; just p.mul_(1 - wd * lr_params) for decoupled wd
                     grad = grad.add(p, alpha=wd)
 
-                grad = grad.to_local()
+                grad = grad.to_local() # this PSGD wrapping only works for DTensor-based distributed training 
                 if grad.numel() == 0: # sharded local grad can be empty 
                     continue 
 
+                grad = grad.squeeze() # squeeze out singleton dims; also good to merge small dims if possible
                 preconditioner_dtype = group["preconditioner_dtype"]
                 if preconditioner_dtype:
-                    grad = grad.squeeze().to(preconditioner_dtype) # squeeze out dim=1; also good to merge small dims if possible
-                else:
-                    grad = grad.squeeze()
+                    grad = grad.to(preconditioner_dtype) 
 
                 state = self.state[p]
                 if len(state) == 0: # initialization
@@ -129,7 +128,7 @@ class WhitenMomentumNS4(torch.optim.Optimizer):
 
                 # resync states occasionally if matmul is not deterministic and divergence of replicated state is large 
                 if state["step"] % group["resync_every"] == 0:
-                    pass # check p.device_mesh and p.placements for subgroups with duplicated states and resync them as in DDP wrapping     
+                    pass # generally no need; if needed, check p.device_mesh and p.placements for subgroups with duplicated states and resync them as the DDP wrapping     
 
         self.cpu_rng_state = torch.get_rng_state()
         self.cuda_rng_state = torch.cuda.get_rng_state()
@@ -164,7 +163,7 @@ if __name__ == "__main__":
     with torch.device("meta"):
         model = ToyModel()
     model.to_empty(device="cuda")
-    FSDP(model, mesh=mesh_2d)
+    FSDP(model, mesh=mesh_2d) # in-place modification  
     model.w.data *= 0
     opt = WhitenMomentumNS4(model.parameters())
     for _ in range(1000):
