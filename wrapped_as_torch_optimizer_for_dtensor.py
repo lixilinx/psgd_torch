@@ -166,7 +166,17 @@ class KWNS4(torch.optim.Optimizer):
 
                 # resync states occasionally if matmul is not deterministic and divergence of replicated state is large 
                 if state["step"] % group["resync_every"] == 0:
-                    pass # generally no need; if needed, check p.device_mesh and p.placements for subgroups with duplicated states and resync them as the DDP wrapping     
+                    # use torch.distributed.breakpoint() to debug to see how to resync subgroups with duplicated states
+                    for mesh_dim, placement in enumerate(p.placements):
+                        if isinstance(placement, torch.distributed.tensor.placement_types.Replicate):
+                            pg = p.device_mesh.get_group(mesh_dim)
+                            src = torch.distributed.get_process_group_ranks(pg)[0]
+                            torch.distributed.broadcast(p.to_local(), src=src, group=pg)
+                            if momentum > 0.0:
+                                torch.distributed.broadcast(state["ema"], src=src, group=pg)
+                            for q, ell in zip(*state["QL"]):
+                                torch.distributed.broadcast(q, src=src, group=pg)
+                                torch.distributed.broadcast(ell, src=src, group=pg)
 
         self.cpu_rng_state = torch.get_rng_state()
         self.cuda_rng_state = torch.cuda.get_rng_state()
