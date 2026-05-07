@@ -4,7 +4,7 @@ RNN network with the classic delayed XOR problem.
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import psgd
+from simplest_standalone_psgd import KWNS4
 
 device = torch.device('cpu')
 batch_size, seq_len = 128, 16
@@ -51,8 +51,8 @@ class Model(torch.nn.Module):
         return h @ self.W2 + self.b2
 
 model = Model().to(device)
-opt = psgd.KronWhiten(model.parameters(), preconditioner_init_scale=1.0, 
-                      lr_params=1e-3, lr_preconditioner=0.01)
+opt = KWNS4(model.parameters(), preconditioner_init_scale=1.0, 
+            lr_params=1e-3, lr_preconditioner=0.1)
 
 def train_loss(xy_pair):  # logistic loss
     return -torch.mean(torch.log(torch.sigmoid(xy_pair[1] * model(xy_pair[0]))))
@@ -60,7 +60,11 @@ def train_loss(xy_pair):  # logistic loss
 Losses = []
 for num_iter in range(100000):
     train_data = generate_train_data()
-    Losses.append(opt.step(lambda: train_loss(train_data)).item())
+    opt.zero_grad()
+    loss = train_loss(train_data)
+    loss.backward()
+    opt.step()
+    Losses.append(loss.item())
     print('Iteration: {}; loss: {}'.format(num_iter, Losses[-1]))
 
     if Losses[-1] < 0.1:
