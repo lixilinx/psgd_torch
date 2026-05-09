@@ -1,6 +1,7 @@
 import torch
 import psgd
 
+
 class KWNS4(torch.optim.Optimizer):
     """
     Kronecker-product whitening preconditioner fitted with online Newton-Schulz iteration for inverse 4th root of gradient/momentum correlation matrix. 
@@ -29,17 +30,17 @@ class KWNS4(torch.optim.Optimizer):
             preconditioner_max_size=float("inf"), 
             preconditioner_max_skew=1.0, # 0.0 => all diagonal Q; inf => all dense Q
             preconditioner_init_scale=1.0, # P0 = preconditioner_init_scale^2 * I; set to smaller values if unsure
-            lr_params=2e-4, # following Adam(W), 1e-3 for whiten_grad=True; sqrt((1-momentum)/(1+momentum)) * 1e-3 for whiten_grad=False   
-            lr_preconditioner=0.5, # Quickly anneal down to 0.01 ~ 0.1. Don't anneal to < 0.1 for bfloat16 preconditioner as eps(bf16) ~ 0.01    
+            lr_params=3e-4, # following Adam(W), 1e-3 for whiten_grad=True; sqrt((1-momentum)/(1+momentum)) * 1e-3 for whiten_grad=False   
+            lr_preconditioner=0.5, # Quickly anneal down to ~ 0.1. Don't anneal to << 0.1 for bfloat16 preconditioner as eps(bf16) ~ 0.01    
             betaL=0.9, 
             damping=1e-9, # roughly the eps in Adam(W) 
             momentum=0.9, # roughly the beta1 in Adam(W)
-            weight_decay=0.05, # following AdamW, we let lr_params * weight_decay = 2e-4 * 0.05 = (AdamW lr 1e-3) * (AdamW wd 0.01)
+            weight_decay=0.0, # e.g., set at lr_params * weight_decay = 2e-4 * 0.05 = (AdamW lr 1e-3) * (AdamW wd 0.01)
             decoupled_weight_decay=True, # True for decoupled weight decay; False for the classic weight decay  
             grad_clip_max_amps=(2.0, 10.0), # clip grad with thresholds (max average amplitude, max element-wise amplitude) 
             preconditioner_update_probability=1.0, # Quickly anneal to 0.01 ~ 0.1 to save computations
             preconditioner_dtype:torch.dtype|None=torch.bfloat16, # bf16 should be good enough for most problems
-            update_preconditioner_first=True, # True for biased updates; False for unbiased updates. 
+            update_preconditioner_first=True, # True for biased updates; False for unbiased updates 
             resync_every=1000_000, # resync every # steps if nondeterministic matmul diverges states too much; generally no need.   
     ):
         assert whiten_grad in (False, True)
@@ -96,7 +97,12 @@ class KWNS4(torch.optim.Optimizer):
             self.cuda_rng_state = state.cpu()
 
     @torch.no_grad()
-    def step(self):
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
         if self.is_distributed: # sync internal rng states; save external rng states 
             external_cpu_rng_state = torch.get_rng_state()
             external_cuda_rng_state = torch.cuda.get_rng_state()
@@ -123,7 +129,7 @@ class KWNS4(torch.optim.Optimizer):
 
                 grad = grad.squeeze() # squeeze out singleton dims; also good to merge small dims here 
                 preconditioner_dtype = group["preconditioner_dtype"]
-                if preconditioner_dtype:
+                if preconditioner_dtype is not None:
                     grad = grad.to(preconditioner_dtype) 
 
                 state = self.state[p]
@@ -175,6 +181,8 @@ class KWNS4(torch.optim.Optimizer):
             torch.set_rng_state(external_cpu_rng_state)
             torch.cuda.set_rng_state(external_cuda_rng_state)
 
+        return loss
+
 
 if __name__ == "__main__":
     # toy demo for verification  
@@ -189,7 +197,7 @@ if __name__ == "__main__":
 
     class ToyModel(torch.nn.Module):
         def __init__(self):
-            super(ToyModel, self).__init__()
+            super().__init__()
             self.w = torch.nn.Parameter(torch.randn(1, 2, 3, 4))
 
         def forward(self, x):
