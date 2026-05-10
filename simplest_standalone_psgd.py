@@ -1,7 +1,7 @@
 """
-We implement a simplest standalone PSGD Kron momentum whitening optimizer:
+We implement a simplest dependency-free PSGD Kron momentum whitening optimizer:
     * Only consider 0/1/2D momentum whitening with real bfloat16 preconditioners. 
-    * Higher order tensors are matricized (could be arbitrary). 
+    * Higher order tensors are matricized (you can redefine _matricize()). 
     * Always diag preconditioner for 0/1D tensors; diag/matrix preconditioner for 2D tensors.  
 """
 
@@ -255,29 +255,34 @@ def apply_diag_diag(QL, G):
     return G * (Qr * Qr) * (Ql * Ql).unsqueeze(1)
 
 
-def _dispatch(Q):
+def _dispatch(
+        Q, 
+        _table={
+            (2, 2): (update_dense_dense, apply_dense_dense),
+            (2, 1): (update_dense_diag, apply_dense_diag),
+            (1, 2): (update_diag_dense, apply_diag_dense),
+            (1, 1): (update_diag_diag, apply_diag_diag),}
+            ):
     """
-    Picks (update_fn, apply_fn) pair based on factor dims. No einsum exprs saved. 
+    Picks (update_fn, apply_fn) pair based on factor dims. No einsum exprs saved.
+    As the name suggests, do not mutate _table.  
     """
     if len(Q) == 1:
         return (update_diag, apply_diag)
     
-    return {
-        (2, 2): (update_dense_dense, apply_dense_dense),
-        (2, 1): (update_dense_diag, apply_dense_diag),
-        (1, 2): (update_diag_dense, apply_diag_dense),
-        (1, 1): (update_diag_diag, apply_diag_diag),
-    }[(Q[0].dim(), Q[1].dim())]
+    return _table[(Q[0].dim(), Q[1].dim())]
 
 
 def _matricize(grad):
     """
-    Reshape a >2D tensor to 2D by the split that's closest to square.
-    Do nothing for <=2D tensor. 
+    First squeeze out singleton axes. Then:
+        reshape a >2D tensor to 2D by the split that's closest to square;
+        do nothing for <=2D tensor. 
     Feel free to redefine this function if you want different behaviors, e.g.,
         Reshape [d0, d1, d2, ...] to [d0, d1 * d2 * ...];
-        Reshape 1D vector to [1, d0] or [d0, 1]. 
+        Reshape 1D vector to [1, d0] or [d0, 1] (if you want dense-Q on vector). 
     """
+    grad = grad.squeeze()
     if grad.dim() <= 2:
         return grad
     
@@ -320,7 +325,7 @@ class KWNS4(torch.optim.Optimizer):
             decoupled_weight_decay=True, # True for decoupled weight decay; False for the classic weight decay  
             grad_clip_max_amps=(2.0, 10.0), # clip grad with thresholds (max average amplitude, max element-wise amplitude) 
             preconditioner_update_probability=1.0, # Quickly anneal to 0.01 ~ 0.1 to save computations
-            resync_every=1000_000, # resync every # steps if nondeterministic matmul diverges states too much; generally no need.   
+            resync_every=1_000_000, # resync every # steps if nondeterministic matmul diverges states too much; generally no need.   
     ):
         assert preconditioner_max_size >= 0.0
         assert preconditioner_max_skew >= 0.0
@@ -331,7 +336,7 @@ class KWNS4(torch.optim.Optimizer):
         assert damping >= 0.0
         assert 0.0 <= momentum < 1.0
         assert weight_decay >= 0.0
-        assert decoupled_weight_decay in (False, True)
+        assert isinstance(decoupled_weight_decay, bool)
         assert grad_clip_max_amps[1] >= grad_clip_max_amps[0] >= 1.0 
         assert 0.0 < preconditioner_update_probability <= 1.0
         assert resync_every > 0
@@ -398,7 +403,7 @@ class KWNS4(torch.optim.Optimizer):
 
                 state = self.state[p]
                 if len(state) == 0: # initialization
-                    grad = _matricize(grad.squeeze())
+                    grad = _matricize(grad)
                     state["ema"] = torch.zeros_like(grad, dtype=p.dtype)
                     state["QL"] = init_kron(grad.to(torch.bfloat16), 
                                             Scale=group["preconditioner_init_scale"], 
@@ -412,7 +417,7 @@ class KWNS4(torch.optim.Optimizer):
 
                 t = state["step"]
                 beta = min(t/(t + 1), momentum)
-                state["ema"].mul_(beta).add_(grad, alpha=1.0 - beta)
+                state["ema"].mul_(beta).add_(grad, alpha=1.0 - beta) # state["ema"].lerp_(grad, 1.0 - beta)
                 state["step"] += 1
 
                 ema_bf16 = state["ema"].to(torch.bfloat16)
@@ -421,11 +426,10 @@ class KWNS4(torch.optim.Optimizer):
                     update_fn(state["QL"], ema_bf16, 
                               lr=group["lr_preconditioner"], betaL=group["betaL"], damping=group["damping"])
 
-                h = apply_fn(state["QL"], ema_bf16).to(p.dtype)
+                h = apply_fn(state["QL"], ema_bf16)
 
                 avg_amp = torch.sqrt(torch.mean(h * h))
-                if avg_amp > max_avg_amp:
-                    h *= max_avg_amp/avg_amp
+                h *= torch.clamp(max_avg_amp/avg_amp, max=1.0) # ok with avg_amp = 0.0
                 h.clamp_(min=-max_element_amp, max=max_element_amp) 
                 p.subtract_(h.view_as(p), alpha=group["lr_params"])
 
