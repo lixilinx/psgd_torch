@@ -52,7 +52,7 @@ class Model(torch.nn.Module):
 
 model = Model().to(device)
 opt = KWNS4(model.parameters(), preconditioner_init_scale=1.0, 
-            lr_params=1e-3, lr_preconditioner=0.1)
+            lr=1e-3, lr_preconditioner=0.1)
 
 def train_loss(xy_pair):  # logistic loss
     return -torch.mean(torch.log(torch.sigmoid(xy_pair[1] * model(xy_pair[0]))))

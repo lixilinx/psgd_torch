@@ -1,5 +1,5 @@
 """
-We implement a simplest dependency-free PSGD Kron momentum whitening optimizer:
+Simple dependency-free Kron momentum Whitening optimizer with NS iterations for inv 4th root of E[gg^T] (KWNS4):
     * Only consider 0/1/2D momentum whitening with real bfloat16 preconditioners. 
     * Higher order tensors are matricized (you can redefine _matricize()). 
     * Always diag preconditioner for 0/1D tensors; diag/matrix preconditioner for 2D tensors.  
@@ -96,7 +96,7 @@ def update_diag(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
 
     term1 = Pg * Pg
     ell = term1.amax() + 1 # term2 = total_numel / Q0.numel() = 1
-    L[0].copy_(torch.max(betaL * L[0] + (1 - betaL) * ell, ell))
+    L[0].copy_(torch.maximum(betaL * L[0] + (1 - betaL) * ell, ell))
     Q0.mul_(1 - lr / L[0] * (term1 - 1))
 
 
@@ -114,14 +114,14 @@ def update_dense_dense(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
 
     term1 = Pg @ Pg.T
     ell = norm_lower_bound_spd(term1) + n
-    L[0].copy_(torch.max(betaL * L[0] + (1 - betaL) * ell, ell))
+    L[0].copy_(torch.maximum(betaL * L[0] + (1 - betaL) * ell, ell))
     term1.diagonal().sub_(n)
     Ql.sub_(lr / L[0] * (term1 @ Ql))
     procrustes_step2(Ql)
 
     term1 = Pg.T @ Pg
     ell = norm_lower_bound_spd(term1) + m
-    L[1].copy_(torch.max(betaL * L[1] + (1 - betaL) * ell, ell))
+    L[1].copy_(torch.maximum(betaL * L[1] + (1 - betaL) * ell, ell))
     term1.diagonal().sub_(m)
     Qr.sub_(lr / L[1] * (term1 @ Qr))
     procrustes_step2(Qr)
@@ -132,7 +132,7 @@ def update_dense_dense(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
 
 def update_dense_diag(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
     """
-    A plain implementation of psgd.update_precond_kron_whiten_q0p5eq1p5 for kron(diag, dense) preconditioner.
+    A plain implementation of psgd.update_precond_kron_whiten_q0p5eq1p5 for dense@(...)*diag preconditioner.
     """
     Q, L = QL
     Ql, Qr = Q
@@ -144,14 +144,14 @@ def update_dense_diag(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
 
     term1 = Pg @ Pg.T
     ell = norm_lower_bound_spd(term1) + n
-    L[0].copy_(torch.max(betaL * L[0] + (1 - betaL) * ell, ell))
+    L[0].copy_(torch.maximum(betaL * L[0] + (1 - betaL) * ell, ell))
     term1.diagonal().sub_(n)
     Ql.sub_(lr / L[0] * (term1 @ Ql))
     procrustes_step2(Ql)
 
     term1 = (Pg * Pg).sum(dim=0)
     ell = term1.amax() + m
-    L[1].copy_(torch.max(betaL * L[1] + (1 - betaL) * ell, ell))
+    L[1].copy_(torch.maximum(betaL * L[1] + (1 - betaL) * ell, ell))
     Qr.mul_(1 - lr / L[1] * (term1 - m))
 
     if torch.rand([]) < 0.01:
@@ -160,7 +160,7 @@ def update_dense_diag(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
 
 def update_diag_dense(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
     """
-    A plain implementation of psgd.update_precond_kron_whiten_q0p5eq1p5 for kron(dense, diag) preconditioner.
+    A plain implementation of psgd.update_precond_kron_whiten_q0p5eq1p5 for diag[:,None]*(...)@dense preconditioner.
     """
     Q, L = QL
     Ql, Qr = Q
@@ -172,12 +172,12 @@ def update_diag_dense(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
 
     term1 = (Pg * Pg).sum(dim=1)
     ell = term1.amax() + n
-    L[0].copy_(torch.max(betaL * L[0] + (1 - betaL) * ell, ell))
+    L[0].copy_(torch.maximum(betaL * L[0] + (1 - betaL) * ell, ell))
     Ql.mul_(1 - lr / L[0] * (term1 - n))
 
     term1 = Pg.T @ Pg
     ell = norm_lower_bound_spd(term1) + m
-    L[1].copy_(torch.max(betaL * L[1] + (1 - betaL) * ell, ell))
+    L[1].copy_(torch.maximum(betaL * L[1] + (1 - betaL) * ell, ell))
     term1.diagonal().sub_(m)
     Qr.sub_(lr / L[1] * (term1 @ Qr))
     procrustes_step2(Qr)
@@ -200,12 +200,12 @@ def update_diag_diag(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
 
     term1 = Pg2.sum(dim=1)
     ell = term1.amax() + n
-    L[0].copy_(torch.max(betaL * L[0] + (1 - betaL) * ell, ell))
+    L[0].copy_(torch.maximum(betaL * L[0] + (1 - betaL) * ell, ell))
     Ql.mul_(1 - lr / L[0] * (term1 - n))
 
     term1 = Pg2.sum(dim=0)
     ell = term1.amax() + m
-    L[1].copy_(torch.max(betaL * L[1] + (1 - betaL) * ell, ell))
+    L[1].copy_(torch.maximum(betaL * L[1] + (1 - betaL) * ell, ell))
     Qr.mul_(1 - lr / L[1] * (term1 - m))
 
     if torch.rand([]) < 0.01:
@@ -231,7 +231,7 @@ def apply_dense_dense(QL, G):
 
 def apply_dense_diag(QL, G):
     """
-    A plain implementation of psgd.precond_grad_kron for kron(diag, dense) preconditioner. 
+    A plain implementation of psgd.precond_grad_kron for dense@(...)*diag preconditioner. 
     """
     Ql, Qr = QL[0]
     Pg = Ql.T @ (Ql @ G)
@@ -240,7 +240,7 @@ def apply_dense_diag(QL, G):
 
 def apply_diag_dense(QL, G):
     """
-    A plain implementation of psgd.precond_grad_kron for kron(dense, diag) preconditioner. 
+    A plain implementation of psgd.precond_grad_kron for diag[:,None]*(...)@dense preconditioner. 
     """
     Ql, Qr = QL[0]
     Pg = (G @ Qr.T) @ Qr
@@ -316,11 +316,12 @@ class KWNS4(torch.optim.Optimizer):
             preconditioner_max_size=float("inf"), 
             preconditioner_max_skew=1.0, # for 2D tensor, 0.0 => all diagonal Q; inf => all dense Q
             preconditioner_init_scale=1.0, # P0 = preconditioner_init_scale^2 * I; set to smaller values if unsure
-            lr_params=3e-4, 
+            lr=3e-4, # the lr_params in PSGD; PSGD has two lrs 
             lr_preconditioner=0.5, # Quickly anneal down to ~ 0.1; don't anneal to ~ 0.01 as eps(bf16) ~ 0.01    
             betaL=0.9, 
             damping=1e-9, # roughly the eps in Adam(W) 
             momentum=0.9, # roughly the beta1 in Adam(W)
+            nesterov=False,
             weight_decay=0.0, 
             decoupled_weight_decay=True, # True for decoupled weight decay; False for the classic weight decay  
             grad_clip_max_amps=(2.0, 10.0), # clip grad with thresholds (max average amplitude, max element-wise amplitude) 
@@ -330,11 +331,12 @@ class KWNS4(torch.optim.Optimizer):
         assert preconditioner_max_size >= 0.0
         assert preconditioner_max_skew >= 0.0
         assert preconditioner_init_scale > 0.0
-        assert lr_params > 0.0
+        assert lr > 0.0
         assert 0.0 < lr_preconditioner < 1.0
         assert 0.0 <= betaL <= 1.0
         assert damping >= 0.0
         assert 0.0 <= momentum < 1.0
+        assert isinstance(nesterov, bool)
         assert weight_decay >= 0.0
         assert isinstance(decoupled_weight_decay, bool)
         assert grad_clip_max_amps[1] >= grad_clip_max_amps[0] >= 1.0 
@@ -345,11 +347,12 @@ class KWNS4(torch.optim.Optimizer):
             "preconditioner_max_size": preconditioner_max_size, 
             "preconditioner_max_skew": preconditioner_max_skew,
             "preconditioner_init_scale": preconditioner_init_scale,
-            "lr_params": lr_params,  
+            "lr": lr,
             "lr_preconditioner": lr_preconditioner, 
             "betaL": betaL, 
             "damping": damping, 
             "momentum": momentum,
+            "nesterov": nesterov,
             "weight_decay": weight_decay,
             "decoupled_weight_decay": decoupled_weight_decay,
             "grad_clip_max_amps": grad_clip_max_amps, 
@@ -397,7 +400,7 @@ class KWNS4(torch.optim.Optimizer):
                 wd = group["weight_decay"]
                 if wd > 0.0: 
                     if group["decoupled_weight_decay"]:
-                        p.mul_(1.0 - wd * group["lr_params"])
+                        p.mul_(1.0 - wd * group["lr"])
                     else:
                         grad = grad.add(p, alpha=wd)
 
@@ -420,18 +423,21 @@ class KWNS4(torch.optim.Optimizer):
                 state["ema"].mul_(beta).add_(grad, alpha=1.0 - beta) # state["ema"].lerp_(grad, 1.0 - beta)
                 state["step"] += 1
 
-                ema_bf16 = state["ema"].to(torch.bfloat16)
+                if group["nesterov"]: # transfer fn: m/(1 - m*z^{-1}) + 1
+                    update = (momentum * state["ema"] + grad).to(torch.bfloat16)
+                else: # transfer fn: 1/(1 - m*z^{-1}); less high frequency 
+                    update = state["ema"].to(torch.bfloat16)
 
                 if update_P:
-                    update_fn(state["QL"], ema_bf16, 
+                    update_fn(state["QL"], update, 
                               lr=group["lr_preconditioner"], betaL=group["betaL"], damping=group["damping"])
 
-                h = apply_fn(state["QL"], ema_bf16)
+                h = apply_fn(state["QL"], update)
 
                 avg_amp = torch.sqrt(torch.mean(h * h))
                 h *= torch.clamp(max_avg_amp/avg_amp, max=1.0) # ok with avg_amp = 0.0
                 h.clamp_(min=-max_element_amp, max=max_element_amp) 
-                p.subtract_(h.view_as(p), alpha=group["lr_params"])
+                p.subtract_(h.view_as(p), alpha=group["lr"])
 
                 # resync states occasionally if matmul is not deterministic and state divergence is large 
                 if self.is_distributed and (state["step"] % group["resync_every"] == 0):
