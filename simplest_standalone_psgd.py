@@ -423,9 +423,9 @@ class KWNS4(torch.optim.Optimizer):
                 state["ema"].mul_(beta).add_(grad, alpha=1.0 - beta) # state["ema"].lerp_(grad, 1.0 - beta)
                 state["step"] += 1
 
-                if group["nesterov"]: # transfer fn: m/(1 - m*z^{-1}) + 1
-                    update = (momentum * state["ema"] + grad).to(torch.bfloat16)
-                else: # transfer fn: 1/(1 - m*z^{-1}); less high frequency 
+                if group["nesterov"]: # transfer fn propto: m/(1 - m*z^{-1}) + 1
+                    update = (momentum * state["ema"] + (1.0 - momentum) * grad).to(torch.bfloat16)
+                else: # transfer fn propto: 1/(1 - m*z^{-1}); less high frequency 
                     update = state["ema"].to(torch.bfloat16)
 
                 if update_P:
