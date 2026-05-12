@@ -11,7 +11,7 @@ class KWNS4(torch.optim.Optimizer):
     The preconditioner can be fitted with two choices:  
         1st): P is fitted by whitening gradient; then apply P on the momentum for param update. 
         2nd): P is fitted by whitening momentum; the whitened momentum is used for param update.
-    For the 2nd choice, we need to reduce lr_params accordingly with increased momentum, roughly by:
+    For the 2nd choice, we need to reduce lr/lr_params accordingly with increased momentum, roughly by:
         (a base lr_params) * sqrt((1 - momentum)/(1 + momentum)) 
     where the base lr_params can be 1e-3 following Adam(W).  
 
@@ -30,7 +30,7 @@ class KWNS4(torch.optim.Optimizer):
             preconditioner_max_size=float("inf"), 
             preconditioner_max_skew=1.0, # 0.0 => all diagonal Q; inf => all dense Q
             preconditioner_init_scale=1.0, # P0 = preconditioner_init_scale^2 * I; set to smaller values if unsure
-            lr_params=3e-4, # following Adam(W), 1e-3 for whiten_grad=True; sqrt((1-momentum)/(1+momentum)) * 1e-3 for whiten_grad=False   
+            lr=3e-4, # lr_params; following Adam(W), 1e-3 for whiten_grad=True; sqrt((1-momentum)/(1+momentum)) * 1e-3 for whiten_grad=False   
             lr_preconditioner=0.5, # Quickly anneal down to ~ 0.1. Don't anneal to << 0.1 for bfloat16 preconditioner as eps(bf16) ~ 0.01    
             betaL=0.9, 
             damping=1e-9, # roughly the eps in Adam(W) 
@@ -39,25 +39,25 @@ class KWNS4(torch.optim.Optimizer):
             decoupled_weight_decay=True, # True for decoupled weight decay; False for the classic weight decay  
             grad_clip_max_amps=(2.0, 10.0), # clip grad with thresholds (max average amplitude, max element-wise amplitude) 
             preconditioner_update_probability=1.0, # Quickly anneal to 0.01 ~ 0.1 to save computations
-            preconditioner_dtype:torch.dtype|None=torch.bfloat16, # bf16 should be good enough for most problems
+            preconditioner_dtype=torch.bfloat16, # bf16 should be good enough for most problems
             update_preconditioner_first=True, # True for biased updates; False for unbiased updates 
-            resync_every=1000_000, # resync every # steps if nondeterministic matmul diverges states too much; generally no need.   
+            resync_every=1_000_000, # resync every # steps if nondeterministic matmul diverges states too much; generally no need.   
     ):
-        assert whiten_grad in (False, True)
+        assert isinstance(whiten_grad, bool)
         assert preconditioner_max_size >= 0.0
         assert preconditioner_max_skew >= 0.0
         assert preconditioner_init_scale > 0.0
-        assert lr_params > 0.0
+        assert lr > 0.0
         assert 0.0 < lr_preconditioner < 1.0
         assert 0.0 <= betaL <= 1.0
         assert damping >= 0.0
         assert 0.0 <= momentum < 1.0
         assert weight_decay >= 0.0
-        assert decoupled_weight_decay in (False, True)
+        assert isinstance(decoupled_weight_decay, bool)
         assert grad_clip_max_amps[1] >= grad_clip_max_amps[0] >= 1.0 
         assert 0.0 < preconditioner_update_probability <= 1.0
-        assert preconditioner_dtype in (None, torch.bfloat16, torch.float32)
-        assert update_preconditioner_first in (False, True)
+        assert preconditioner_dtype in (torch.bfloat16, torch.float32)
+        assert isinstance(update_preconditioner_first, bool)
         assert resync_every > 0
         if not whiten_grad:
             assert momentum > 0.0, "Cannot whiten momentum if momentum setting is zero."
@@ -67,7 +67,7 @@ class KWNS4(torch.optim.Optimizer):
             "preconditioner_max_size": preconditioner_max_size, 
             "preconditioner_max_skew": preconditioner_max_skew,
             "preconditioner_init_scale": preconditioner_init_scale,
-            "lr_params": lr_params,  
+            "lr": lr,  
             "lr_preconditioner": lr_preconditioner, 
             "betaL": betaL, 
             "damping": damping, 
@@ -81,6 +81,8 @@ class KWNS4(torch.optim.Optimizer):
             "resync_every": resync_every,
         }
         super().__init__(params, defaults)
+
+        self._step = 0
 
         self.dQ = "Q0.5EQ1.5" # one can change these 3 lines to switch the preconditioner 
         self.update_precond = psgd.update_precond_kron_whiten_q0p5eq1p5
@@ -110,10 +112,13 @@ class KWNS4(torch.optim.Optimizer):
             torch.cuda.set_rng_state(self.cuda_rng_state)
 
         for group in self.param_groups:
+            preconditioner_dtype = group["preconditioner_dtype"]
             momentum = group["momentum"]
             max_avg_amp, max_element_amp = group["grad_clip_max_amps"]
+            prb = group["preconditioner_update_probability"]
+            update_P = int(self._step * prb + 1) > int((self._step - 1) * prb + 1) # +1 so that update_P=True for step=0
             updateP_first, updateP_last = ((group["update_preconditioner_first"], not group["update_preconditioner_first"]) 
-                                           if torch.rand([]) < group["preconditioner_update_probability"] else (False, False))
+                                           if update_P else (False, False))
                 
             for p in group["params"]:
                 grad = p.grad
@@ -123,24 +128,21 @@ class KWNS4(torch.optim.Optimizer):
                 wd = group["weight_decay"]
                 if wd > 0.0: 
                     if group["decoupled_weight_decay"]:
-                        p.mul_(1.0 - wd * group["lr_params"])
+                        p.mul_(1.0 - wd * group["lr"])
                     else:
                         grad = grad.add(p, alpha=wd)
 
-                grad = grad.squeeze() # squeeze out singleton dims; also good to merge small dims here 
-                preconditioner_dtype = group["preconditioner_dtype"]
-                if preconditioner_dtype is not None:
-                    grad = grad.to(preconditioner_dtype) 
+                grad = grad.squeeze() # squeeze out singleton dims
 
                 state = self.state[p]
                 if len(state) == 0: # initialization
-                    state["QL"], state["exprs"] = psgd.init_kron(grad, 
+                    state["QL"], state["exprs"] = psgd.init_kron(grad.to(preconditioner_dtype), 
                                                                  Scale=group["preconditioner_init_scale"], 
                                                                  max_size=group["preconditioner_max_size"], 
                                                                  max_skew=group["preconditioner_max_skew"], 
                                                                  dQ=self.dQ)
                     state["step"] = 0
-                    state["ema"] = None if momentum == 0.0 else torch.zeros_like(grad) # exp moving avg of grad as momentum 
+                    state["ema"] = torch.zeros_like(grad, dtype=p.dtype) if momentum > 0.0 else None  # exp moving avg of grad as momentum 
 
                 t = state["step"]
                 if momentum > 0.0:
@@ -150,20 +152,19 @@ class KWNS4(torch.optim.Optimizer):
 
                 to_be_whitened = grad if group["whiten_grad"] else state["ema"]
                 if updateP_first: # update P before applying on grad/momentum; biased 
-                    self.update_precond(state["QL"], state["exprs"], to_be_whitened, 
+                    self.update_precond(state["QL"], state["exprs"], to_be_whitened.to(preconditioner_dtype), 
                                         lr=group["lr_preconditioner"], betaL=group["betaL"], damping=group["damping"])
 
-                to_be_preconded = grad if momentum == 0.0 else state["ema"]    
+                to_be_preconded = (state["ema"] if momentum > 0.0 else grad).to(preconditioner_dtype)    
                 h = self.precond_grad(state["QL"], state["exprs"], to_be_preconded)
 
                 avg_amp = torch.sqrt(torch.mean(h*h))
-                if avg_amp > max_avg_amp:
-                    h *= max_avg_amp/avg_amp
+                h *= torch.clamp(max_avg_amp/avg_amp, max=1.0) # ok with avg_amp = 0.0
                 h.clamp_(min=-max_element_amp, max=max_element_amp) 
-                p.subtract_(h.view_as(p), alpha=group["lr_params"])
+                p.subtract_(h.view_as(p), alpha=group["lr"])
 
                 if updateP_last: # update P after applying on grad/momentum; unbiased 
-                    self.update_precond(state["QL"], state["exprs"], to_be_whitened, 
+                    self.update_precond(state["QL"], state["exprs"], to_be_whitened.to(preconditioner_dtype), 
                                         lr=group["lr_preconditioner"], betaL=group["betaL"], damping=group["damping"])
 
                 # resync states occasionally if matmul is not deterministic and state divergence is large 
@@ -181,6 +182,7 @@ class KWNS4(torch.optim.Optimizer):
             torch.set_rng_state(external_cpu_rng_state)
             torch.cuda.set_rng_state(external_cuda_rng_state)
 
+        self._step += 1
         return loss
 
 
