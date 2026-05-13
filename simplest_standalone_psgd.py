@@ -424,7 +424,7 @@ class KWNS4(torch.optim.Optimizer):
                 state["step"] += 1
 
                 if group["nesterov"]: # transfer fn propto: m/(1 - m*z^{-1}) + 1
-                    update = (momentum * state["ema"] + (1.0 - momentum) * grad).to(torch.bfloat16)
+                    update = (beta * state["ema"] + (1.0 - beta) * grad).to(torch.bfloat16)
                 else: # transfer fn propto: 1/(1 - m*z^{-1}); less high frequency 
                     update = state["ema"].to(torch.bfloat16)
 
