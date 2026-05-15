@@ -1,8 +1,8 @@
 """
-Simplest dependency-free Kron momentum Whitening optimizer with NS iterations for inv 4th root of E[gg^T] (KWNS4):
-    * Only consider 0/1/2D momentum whitening with real bfloat16 preconditioners (relative damping level 2**-8). 
-    * Higher order tensors are matricized (you can redefine _matricize()). 
-    * Always diag preconditioner for 0/1D tensors; per-axis diag/matrix preconditioner for 2D tensors.  
+Simple dependency-free Kron momentum Whitening optimizer with NS iterations for inv 4th root of E[gg^T] (KWNS4):
+    * Any-rank momentum whitening with real bfloat16 preconditioners (relative damping level 2**-8). 
+    * Always diag preconditioner for 0/1D tensors; per-axis diag/matrix preconditioner for >=2D tensors.
+    * You can redefine _tensorize(), e.g., 1) mergy small dims; 2) reshape vector to matrix to use dense preconditioner.   
 """
 
 import torch
@@ -52,18 +52,16 @@ def procrustes_step2(Q, max_step_size=1/8):
 
 def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0):
     """
-    A simplified version of psgd.init_kron: only dQ="Q0.5EQ1.5"; always diag Q for 0/1D tensor. 
+    A simplified version of psgd.init_kron: only dQ="Q0.5EQ1.5"; no einsum. 
     """
     shape = t.shape
-    if len(shape) not in [0, 1, 2]:
-        raise ValueError(f"Only 0D, 1D and 2D param supported; got shape {shape}.")
     
     if len(shape) <= 1:
         Q = [Scale * torch.ones(shape, dtype=t.dtype, device=t.device)]
         L = [torch.zeros([], dtype=torch.float32, device=t.device)]
         return [Q, L]
     
-    scale = Scale ** 0.5
+    scale = Scale ** (1.0 / len(shape))
     Q, L = [], []
     for size in shape:
         L.append(torch.zeros([], dtype=torch.float32, device=t.device))
@@ -74,13 +72,14 @@ def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0):
     return [Q, L]
 
 
-def _balance_2(Ql, Qr):
+def _balance_n(Q):
     """
     A simplified version of psgd.balance_kron_precond. 
     """
-    rho = (Qr.abs().amax() / Ql.abs().amax()).sqrt()
-    Ql.mul_(rho)
-    Qr.div_(rho)
+    norms = [q.abs().amax() for q in Q]
+    gmean = torch.prod(torch.stack(norms)) ** (1.0 / len(Q))
+    for q, nrm in zip(Q, norms):
+        q.mul_(gmean / nrm)
 
 
 def update_diag(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
@@ -100,115 +99,37 @@ def update_diag(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
     Q0.mul_(1 - lr / L[0] * (term1 - 1))
 
 
-def update_dense_dense(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
+def update_kron(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
     """
-    A plain implementation of psgd.update_precond_kron_whiten_q0p5eq1p5 for kron(dense, dense) preconditioner.
-    """
-    Q, L = QL
-    Ql, Qr = Q
-    m, n = G.shape
-
-    Gd = G + (damping + 2**-8 * G.abs()) * torch.randn_like(G)
-    Pg = torch.linalg.multi_dot([Ql.T, Ql, Gd, Qr.T, Qr])
-
-    term1 = Pg @ Pg.T
-    ell = norm_lower_bound_spd(term1) + n
-    L[0].copy_(torch.maximum(betaL * L[0] + (1 - betaL) * ell, ell))
-    term1.diagonal().sub_(n)
-    Ql.sub_(lr / L[0] * (term1 @ Ql))
-    procrustes_step2(Ql)
-
-    term1 = Pg.T @ Pg
-    ell = norm_lower_bound_spd(term1) + m
-    L[1].copy_(torch.maximum(betaL * L[1] + (1 - betaL) * ell, ell))
-    term1.diagonal().sub_(m)
-    Qr.sub_(lr / L[1] * (term1 @ Qr))
-    procrustes_step2(Qr)
-
-    if torch.rand([]) < 0.01:
-        _balance_2(Ql, Qr)
-
-
-def update_dense_diag(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
-    """
-    A plain implementation of psgd.update_precond_kron_whiten_q0p5eq1p5 for dense@(...)*diag preconditioner.
+    A plain implementation of psgd.update_precond_kron_whiten_q0p5eq1p5 with matmul.
+    Warning: unlike psgd.update_precond_kron_whiten_q0p5eq1p5, update_kron only applies to >=2D G. 
     """
     Q, L = QL
-    Ql, Qr = Q
-    m, n = G.shape
+    N = G.dim()
+    total_numel = G.numel()
 
     Gd = G + (damping + 2**-8 * G.abs()) * torch.randn_like(G)
-    Pg = torch.linalg.multi_dot([Ql.T, Ql, Gd])
-    Pg = Pg * (Qr * Qr)
-
-    term1 = Pg @ Pg.T
-    ell = norm_lower_bound_spd(term1) + n
-    L[0].copy_(torch.maximum(betaL * L[0] + (1 - betaL) * ell, ell))
-    term1.diagonal().sub_(n)
-    Ql.sub_(lr / L[0] * (term1 @ Ql))
-    procrustes_step2(Ql)
-
-    term1 = (Pg * Pg).sum(dim=0)
-    ell = term1.amax() + m
-    L[1].copy_(torch.maximum(betaL * L[1] + (1 - betaL) * ell, ell))
-    Qr.mul_(1 - lr / L[1] * (term1 - m))
-
-    if torch.rand([]) < 0.01:
-        _balance_2(Ql, Qr)
-
-
-def update_diag_dense(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
-    """
-    A plain implementation of psgd.update_precond_kron_whiten_q0p5eq1p5 for diag[:,None]*(...)@dense preconditioner.
-    """
-    Q, L = QL
-    Ql, Qr = Q
-    m, n = G.shape
-
-    Gd = G + (damping + 2**-8 * G.abs()) * torch.randn_like(G)
-    Pg = torch.linalg.multi_dot([Gd, Qr.T, Qr])
-    Pg = (Ql * Ql).unsqueeze(1) * Pg
-
-    term1 = (Pg * Pg).sum(dim=1)
-    ell = term1.amax() + n
-    L[0].copy_(torch.maximum(betaL * L[0] + (1 - betaL) * ell, ell))
-    Ql.mul_(1 - lr / L[0] * (term1 - n))
-
-    term1 = Pg.T @ Pg
-    ell = norm_lower_bound_spd(term1) + m
-    L[1].copy_(torch.maximum(betaL * L[1] + (1 - betaL) * ell, ell))
-    term1.diagonal().sub_(m)
-    Qr.sub_(lr / L[1] * (term1 @ Qr))
-    procrustes_step2(Qr)
-
-    if torch.rand([]) < 0.01:
-        _balance_2(Ql, Qr)
-
-
-def update_diag_diag(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
-    """
-    A plain implementation of psgd.update_precond_kron_whiten_q0p5eq1p5 for kron(diag, diag) preconditioner.
-    """
-    Q, L = QL
-    Ql, Qr = Q
-    m, n = G.shape
-
-    Gd = G + (damping + 2**-8 * G.abs()) * torch.randn_like(G)
-    Pg = Gd * (Qr * Qr) * (Ql * Ql).unsqueeze(1)
-    Pg2 = Pg * Pg
-
-    term1 = Pg2.sum(dim=1)
-    ell = term1.amax() + n
-    L[0].copy_(torch.maximum(betaL * L[0] + (1 - betaL) * ell, ell))
-    Ql.mul_(1 - lr / L[0] * (term1 - n))
-
-    term1 = Pg2.sum(dim=0)
-    ell = term1.amax() + m
-    L[1].copy_(torch.maximum(betaL * L[1] + (1 - betaL) * ell, ell))
-    Qr.mul_(1 - lr / L[1] * (term1 - m))
-
-    if torch.rand([]) < 0.01:
-        _balance_2(Ql, Qr)
+    Pg = apply_kron(QL, Gd)
+    for i, q in enumerate(Q):
+        n_i = q.shape[0]
+        term2 = total_numel / n_i
+        others = [d for d in range(N) if d != i]
+        if q.dim() < 2: 
+            term1 = (Pg * Pg).sum(dim=others) 
+            ell = term1.amax() + term2  
+            L[i].copy_(torch.maximum(betaL * L[i] + (1 - betaL) * ell, ell))
+            q.mul_(1 - lr / L[i] * (term1 - term2))
+        else:
+            flat = Pg.movedim(i, 0).reshape(n_i, -1)
+            term1 = flat @ flat.T 
+            ell = norm_lower_bound_spd(term1) + term2
+            L[i].copy_(torch.maximum(betaL * L[i] + (1 - betaL) * ell, ell))
+            term1.diagonal().sub_(term2)
+            q.sub_(lr / L[i] * (term1 @ q))
+            procrustes_step2(q)
+            
+    if torch.rand([]) < 0.01: 
+        _balance_n(Q)
 
 
 def apply_diag(QL, G):
@@ -219,86 +140,43 @@ def apply_diag(QL, G):
     return Q0 * Q0 * G
 
 
-def apply_dense_dense(QL, G):
+def apply_kron(QL, G):
     """
-    A plain implementation of psgd.precond_grad_kron for kron(dense, dense) preconditioner. 
+    A plain implementation of psgd.precond_grad_kron with matmul. 
     """
-    Ql, Qr = QL[0]
-    return torch.linalg.multi_dot([Ql.T, Ql, G, Qr.T, Qr])
+    Q = QL[0]
+    N = G.dim()
+    Pg = G
+    for i, q in enumerate(Q):
+        if q.dim() == 1:
+            s = q * q
+            Pg = Pg * s.view([1] * i + [-1] + [1] * (N - i - 1))
+        else:
+            Pg = Pg.movedim(i, 0)
+            n_i = Pg.shape[0]
+            rest = Pg.shape[1:]
+            flat = Pg.reshape(n_i, -1)
+            flat = torch.linalg.multi_dot([q.T, q, flat])
+            Pg = flat.view(n_i, *rest).movedim(0, i)
+    return Pg
+        
 
-
-def apply_dense_diag(QL, G):
-    """
-    A plain implementation of psgd.precond_grad_kron for dense@(...)*diag preconditioner. 
-    """
-    Ql, Qr = QL[0]
-    Pg = torch.linalg.multi_dot([Ql.T, Ql, G])
-    return Pg * (Qr * Qr)
-
-
-def apply_diag_dense(QL, G):
-    """
-    A plain implementation of psgd.precond_grad_kron for diag[:,None]*(...)@dense preconditioner. 
-    """
-    Ql, Qr = QL[0]
-    Pg = torch.linalg.multi_dot([G, Qr.T, Qr])
-    return (Ql * Ql).unsqueeze(1) * Pg
-
-
-def apply_diag_diag(QL, G):
-    """
-    A plain implementation of psgd.precond_grad_kron for kron(diag, diag) preconditioner. 
-    """
-    Ql, Qr = QL[0]
-    return G * (Qr * Qr) * (Ql * Ql).unsqueeze(1)
-
-
-def _dispatch(
-        Q, 
-        _table={
-            (2, 2): (update_dense_dense, apply_dense_dense),
-            (2, 1): (update_dense_diag, apply_dense_diag),
-            (1, 2): (update_diag_dense, apply_diag_dense),
-            (1, 1): (update_diag_diag, apply_diag_diag),}
-            ):
+def _dispatch(Q):
     """
     Picks (update_fn, apply_fn) pair based on factor dims. No einsum exprs saved.
-    As the name suggests, do not mutate _table.  
     """
     if len(Q) == 1:
         return (update_diag, apply_diag)
-    
-    return _table[(Q[0].dim(), Q[1].dim())]
+    return (update_kron, apply_kron)
 
 
-def _matricize(grad):
+def _tensorize(grad):
     """
-    First squeeze out singleton axes. Then:
-        reshape a >2D tensor to 2D by the split that's closest to square;
-        do nothing for <=2D tensor. 
     Feel free to redefine this function if you want different behaviors, e.g.,
-        Reshape [d0, d1, d2, ...] to [d0, d1 * d2 * ...];
+        Merge tiny dims, say reshape [100, 2, 2, 100] to [100, 4, 100];
         Reshape 1D vector to [1, d0] or [d0, 1] (if you want dense-Q on vector). 
     """
-    grad = grad.squeeze()
-    if grad.dim() <= 2:
-        return grad
-    
-    shape = grad.shape
-    total = grad.numel()
-    best_k, best_ratio, left = 1, float("inf"), 1
-    for k in range(1, len(shape)):
-        left *= shape[k - 1]
-        right = total // left
-        ratio = max(left, right) / min(left, right)
-        if ratio < best_ratio:
-            best_ratio, best_k = ratio, k
-
-    new_left = 1
-    for i in range(best_k):
-        new_left *= shape[i]
-
-    return grad.reshape(new_left, -1)
+    return grad.squeeze()
 
 
 class KWNS4(torch.optim.Optimizer):
@@ -312,7 +190,7 @@ class KWNS4(torch.optim.Optimizer):
             self,
             params,
             preconditioner_max_size=float("inf"), 
-            preconditioner_max_skew=1.0, # for 2D tensor, 0.0 => all diagonal Q; inf => all dense Q
+            preconditioner_max_skew=1.0, # for >=2D tensor, 0.0 => all diagonal Q; inf => all dense Q
             preconditioner_init_scale=1.0, # P0 = preconditioner_init_scale^2 * I; set to smaller values if unsure
             lr=3e-4, # the lr_params in PSGD; PSGD has two lrs 
             lr_preconditioner=0.5, # Quickly anneal down to ~ 0.1; don't anneal to ~ 0.01 as eps(bf16) ~ 0.01    
@@ -404,7 +282,7 @@ class KWNS4(torch.optim.Optimizer):
 
                 state = self.state[p]
                 if len(state) == 0: # initialization
-                    grad = _matricize(grad)
+                    grad = _tensorize(grad)
                     state["ema"] = torch.zeros_like(grad, dtype=p.dtype)
                     state["QL"] = init_kron(grad.to(torch.bfloat16), 
                                             Scale=group["preconditioner_init_scale"], 

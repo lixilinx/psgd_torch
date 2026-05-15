@@ -4,7 +4,7 @@ RNN network with the classic delayed XOR problem.
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from simplest_standalone_psgd import KWNS4
+from simple_standalone_psgd import KWNS4
 
 device = torch.device('cpu')
 batch_size, seq_len = 128, 16
