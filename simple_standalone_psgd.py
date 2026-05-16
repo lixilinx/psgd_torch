@@ -1,8 +1,10 @@
 """
-Simple dependency-free Kron momentum Whitening optimizer with NS iterations for inv 4th root of E[gg^T] (KWNS4):
-    * Any-rank momentum whitening with real bfloat16 preconditioners (relative damping level 2**-8). 
+Simple dependency-free Kron momentum Whitening optimizer with NS iterations for inv 4th root of E[gg^T] (KWNS4).
+Largely corresponds to psgd.KronWhiten with dQ=Q0p5EQ1p5, but with some adaptations:
+    * Only real bfloat16 momentun whitening preconditioners. 
     * Always diag preconditioner for 0/1D tensors; per-axis diag/matrix preconditioner for >=2D tensors.
-    * You can redefine _tensorize(), e.g., 1) mergy small dims; 2) reshape vector to matrix to use dense preconditioner.   
+    * Einsum is replaced with matmul.   
+    * You can redefine _tensorize(), e.g., 1) merge small adjacent dims; 2) reshape vector to matrix to use dense preconditioner.   
 """
 
 import torch
@@ -24,7 +26,7 @@ def norm_lower_bound_spd(A, k=128, half_iters=2):
 
 def norm_lower_bound_skh(A, k=128, half_iters=2):
     """
-    A simplified version psgd.norm_lower_bound_skh with plain random init (no centroid alignment). 
+    A simplified version of psgd.norm_lower_bound_skh with plain random init (no centroid alignment). 
     """
     normalizing_factor = A.abs().amax() + 2**-126
     A = A / normalizing_factor  
@@ -52,7 +54,7 @@ def procrustes_step2(Q, max_step_size=1/8):
 
 def init_kron(t, Scale=1.0, max_size=float("inf"), max_skew=1.0):
     """
-    A simplified version of psgd.init_kron: only dQ="Q0.5EQ1.5"; no einsum. 
+    A simplified version of psgd.init_kron: only for dQ="Q0.5EQ1.5"; no einsum exprs. 
     """
     shape = t.shape
     
@@ -89,7 +91,7 @@ def update_diag(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
     Q, L = QL
     Q0 = Q[0]
 
-    Gd = G + (damping + 2**-8 * G.abs()) * torch.randn_like(G)
+    Gd = G + (damping + 2**-8 * G.abs()) * torch.randn_like(G) # 2**-8 = eps(bf16)/2
 
     Pg = Q0 * Q0 * Gd
 
@@ -101,14 +103,14 @@ def update_diag(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
 
 def update_kron(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
     """
-    A plain implementation of psgd.update_precond_kron_whiten_q0p5eq1p5 with matmul.
-    Warning: unlike psgd.update_precond_kron_whiten_q0p5eq1p5, update_kron only applies to >=2D G. 
+    A plain implementation of psgd.update_precond_kron_whiten_q0p5eq1p5 with matmul, no einsum.
+    Unlike psgd.update_precond_kron_whiten_q0p5eq1p5, update_kron only applies to >=2D tensor G. 
     """
     Q, L = QL
     N = G.dim()
     total_numel = G.numel()
 
-    Gd = G + (damping + 2**-8 * G.abs()) * torch.randn_like(G)
+    Gd = G + (damping + 2**-8 * G.abs()) * torch.randn_like(G) # 2**-8 = eps(bf16)/2
     Pg = apply_kron(QL, Gd)
     for i, q in enumerate(Q):
         n_i = q.shape[0]
@@ -142,13 +144,13 @@ def apply_diag(QL, G):
 
 def apply_kron(QL, G):
     """
-    A plain implementation of psgd.precond_grad_kron with matmul. 
+    A plain implementation of psgd.precond_grad_kron with matmul, no einsum. 
     """
     Q = QL[0]
     N = G.dim()
     Pg = G
     for i, q in enumerate(Q):
-        if q.dim() == 1:
+        if q.dim() < 2:
             s = q * q
             Pg = Pg * s.view([1] * i + [-1] + [1] * (N - i - 1))
         else:
@@ -173,24 +175,24 @@ def _dispatch(Q):
 def _tensorize(grad):
     """
     Feel free to redefine this function if you want different behaviors, e.g.,
-        Merge tiny dims, say reshape [100, 2, 2, 100] to [100, 4, 100];
-        Reshape 1D vector to [1, d0] or [d0, 1] (if you want dense-Q on vector). 
+        Merge small adjacent dims, say [64, 32, 3, 3] to [64, 32, 9];
+        Reshape 1D vector to [1, d] or [d, 1] if you want dense-Q on vector. 
     """
     return grad.squeeze()
 
 
 class KWNS4(torch.optim.Optimizer):
     """
-    A simplified version of wrapped_as_torch_optimizer_for_ddp.py (a DDP wrapping). 
+    A simplified version of wrapped_as_torch_optimizer_for_ddp.KWNS4/psgd.KronWhiten for single-GPU/DDP training. 
     Important tips:
-        initial value lr_preconditioner=0.5 is too high and needs to anneal to ~0.1;
+        initial value lr_preconditioner=0.5 is too high and needs to anneal to ~0.1 (not too small as eps(bf16)~0.01);
         initial value preconditioner_update_probability=1.0 is too high and needs to anneal to 0.01~0.1.  
     """
     def __init__(
             self,
             params,
             preconditioner_max_size=float("inf"), 
-            preconditioner_max_skew=1.0, # for >=2D tensor, 0.0 => all diagonal Q; inf => all dense Q
+            preconditioner_max_skew=1.0, # for >=2D tensor: 0.0 => all diagonal Q; inf => all dense Q
             preconditioner_init_scale=1.0, # P0 = preconditioner_init_scale^2 * I; set to smaller values if unsure
             lr=3e-4, # the lr_params in PSGD; PSGD has two lrs 
             lr_preconditioner=0.5, # Quickly anneal down to ~ 0.1; don't anneal to ~ 0.01 as eps(bf16) ~ 0.01    
@@ -211,7 +213,7 @@ class KWNS4(torch.optim.Optimizer):
         assert 0.0 < lr_preconditioner < 1.0
         assert 0.0 <= betaL <= 1.0
         assert damping >= 0.0
-        assert 0.0 <= momentum < 1.0
+        assert 0.0 <= momentum <= 1.0
         assert isinstance(nesterov, bool)
         assert weight_decay >= 0.0
         assert isinstance(decoupled_weight_decay, bool)
