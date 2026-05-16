@@ -46,7 +46,7 @@ def procrustes_step2(Q, max_step_size=1/8):
     R /= norm_lower_bound_skh(R) + 2**-126 
     RQ = R @ Q
     RRQ = R @ RQ
-    tr_RQ = RQ.diagonal().sum()
+    tr_RQ = RQ.diagonal().sum() # trace not implemented for CPU bf16 matrix
     tr_RRQ = RRQ.diagonal().sum() 
     a = torch.where(tr_RRQ < 0, torch.clamp(-tr_RQ / tr_RRQ, max=max_step_size), max_step_size)
     Q.add_(a * (RQ + 0.5 * a * RRQ))
@@ -150,7 +150,7 @@ def update_dense_diag(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
     Ql.sub_(lr / L[0] * (term1 @ Ql))
     procrustes_step2(Ql)
 
-    term1 = (Pg * Pg).sum(dim=0)
+    term1 = torch.linalg.vector_norm(Pg, dim=0).square_() # (Pg * Pg).sum(dim=0)
     ell = term1.amax() + m
     L[1].copy_(torch.maximum(betaL * L[1] + (1 - betaL) * ell, ell))
     Qr.mul_(1 - lr / L[1] * (term1 - m))
@@ -171,7 +171,7 @@ def update_diag_dense(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
     Pg = torch.linalg.multi_dot([Gd, Qr.T, Qr])
     Pg = (Ql * Ql).unsqueeze(1) * Pg
 
-    term1 = (Pg * Pg).sum(dim=1)
+    term1 = torch.linalg.vector_norm(Pg, dim=1).square_() # (Pg * Pg).sum(dim=1)
     ell = term1.amax() + n
     L[0].copy_(torch.maximum(betaL * L[0] + (1 - betaL) * ell, ell))
     Ql.mul_(1 - lr / L[0] * (term1 - n))
@@ -318,7 +318,7 @@ class KWNS4(torch.optim.Optimizer):
             preconditioner_init_scale=1.0, # P0 = preconditioner_init_scale^2 * I; set to smaller values if unsure
             lr=3e-4, # the lr_params in PSGD; PSGD has two lrs 
             lr_preconditioner=0.5, # Quickly anneal down to ~ 0.1; don't anneal to ~ 0.01 as eps(bf16) ~ 0.01    
-            betaL=0.9, 
+            betaL=0.9, # larger/smaller betaL => longer/shorter history of momentums for whitening
             damping=1e-9, # roughly the eps in Adam(W) 
             momentum=0.9, # roughly the beta1 in Adam(W)
             nesterov=False,
@@ -407,7 +407,7 @@ class KWNS4(torch.optim.Optimizer):
                 state = self.state[p]
                 if len(state) == 0: # initialization
                     grad = _matricize(grad)
-                    state["ema"] = torch.zeros_like(grad, dtype=p.dtype)
+                    state["ema"] = torch.zeros_like(grad)
                     state["QL"] = init_kron(grad.to(torch.bfloat16), 
                                             Scale=group["preconditioner_init_scale"], 
                                             max_size=group["preconditioner_max_size"], 
@@ -420,11 +420,11 @@ class KWNS4(torch.optim.Optimizer):
 
                 t = state["step"]
                 beta = min(t/(t + 1), momentum)
-                state["ema"].mul_(beta).add_(grad, alpha=1.0 - beta) # state["ema"].lerp_(grad, 1.0 - beta)
+                state["ema"].lerp_(grad, 1.0 - beta) # state["ema"].mul_(beta).add_(grad, alpha=1.0 - beta) 
                 state["step"] += 1
 
                 if group["nesterov"]: # transfer fn propto: m/(1 - m*z^{-1}) + 1
-                    update = (beta * state["ema"] + (1.0 - beta) * grad).to(torch.bfloat16)
+                    update = grad.lerp(state["ema"], beta).to(torch.bfloat16) # beta * state["ema"] + (1.0 - beta) * grad 
                 else: # transfer fn propto: 1/(1 - m*z^{-1}); less high frequency 
                     update = state["ema"].to(torch.bfloat16)
 
@@ -434,10 +434,10 @@ class KWNS4(torch.optim.Optimizer):
 
                 h = apply_fn(state["QL"], update)
 
-                avg_amp = torch.sqrt(torch.mean(h * h))
+                avg_amp = torch.linalg.vector_norm(h) * h.numel() ** -0.5 # torch.sqrt(torch.mean(h * h))
                 h *= torch.clamp(max_avg_amp/avg_amp, max=1.0) # ok with avg_amp = 0.0
                 h.clamp_(min=-max_element_amp, max=max_element_amp) 
-                p.subtract_(h.view_as(p), alpha=group["lr"])
+                p.sub_(h.view_as(p), alpha=group["lr"])
 
                 # resync states occasionally if matmul is not deterministic and state divergence is large 
                 if self.is_distributed and (state["step"] % group["resync_every"] == 0):
