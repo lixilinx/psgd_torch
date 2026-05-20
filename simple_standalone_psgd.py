@@ -3,7 +3,7 @@ Simple dependency-free Kron momentum Whitening optimizer with NS iterations for 
 Largely corresponds to psgd.KronWhiten with dQ=Q0p5EQ1p5, but with some adaptations:
     * Only real bfloat16 momentun whitening preconditioners. 
     * Always diag preconditioner for 0/1D tensors; per-axis diag/matrix preconditioner for >=2D tensors.
-    * Einsum is replaced with matmul.   
+    * Einsum is replaced with matmul and multi_dot to avoid any overhead.   
     * You can redefine _tensorize(), e.g., 1) merge small adjacent dims; 2) reshape vector to matrix to use dense preconditioner.   
 """
 
@@ -97,14 +97,14 @@ def update_diag(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
 
     term1 = Pg * Pg
     ell = term1.amax() + 1 # term2 = total_numel / Q0.numel() = 1
-    L[0].copy_(torch.maximum(betaL * L[0] + (1 - betaL) * ell, ell))
+    L[0].mul_(betaL).add_(ell, alpha=1 - betaL).clamp_(min=ell) # L[0].copy_(torch.maximum(betaL * L[0] + (1 - betaL) * ell, ell))
     Q0.mul_(1 - lr / L[0] * (term1 - 1))
 
 
 def update_kron(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
     """
     A plain implementation of psgd.update_precond_kron_whiten_q0p5eq1p5 with matmul, no einsum.
-    Unlike psgd.update_precond_kron_whiten_q0p5eq1p5, update_kron only applies to >=2D tensor G. 
+    Unlike psgd.update_precond_kron_whiten_q0p5eq1p5, update_kron here only works for >=2D tensors. 
     """
     Q, L = QL
     N = G.dim()
@@ -119,19 +119,16 @@ def update_kron(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
         if q.dim() < 2: 
             term1 = torch.linalg.vector_norm(Pg, dim=others).square_() # (Pg * Pg).sum(dim=others) 
             ell = term1.amax() + term2  
-            L[i].copy_(torch.maximum(betaL * L[i] + (1 - betaL) * ell, ell))
+            L[i].mul_(betaL).add_(ell, alpha=1 - betaL).clamp_(min=ell) # L[i].copy_(torch.maximum(betaL * L[i] + (1 - betaL) * ell, ell))
             q.mul_(1 - lr / L[i] * (term1 - term2))
         else:
             flat = Pg.movedim(i, 0).reshape(n_i, -1)
             term1 = flat @ flat.T 
             ell = norm_lower_bound_spd(term1) + term2
-            L[i].copy_(torch.maximum(betaL * L[i] + (1 - betaL) * ell, ell))
+            L[i].mul_(betaL).add_(ell, alpha=1 - betaL).clamp_(min=ell) # L[i].copy_(torch.maximum(betaL * L[i] + (1 - betaL) * ell, ell))
             term1.diagonal().sub_(term2)
             q.sub_(lr / L[i] * (term1 @ q))
             procrustes_step2(q)
-            
-    if torch.rand([]) < 0.01: 
-        _balance_n(Q)
 
 
 def apply_diag(QL, G):
@@ -145,6 +142,7 @@ def apply_diag(QL, G):
 def apply_kron(QL, G):
     """
     A plain implementation of psgd.precond_grad_kron with matmul, no einsum. 
+    No universal best einsum implementation. The one here is simple and not bad.  
     """
     Q = QL[0]
     N = G.dim()
@@ -177,6 +175,7 @@ def _tensorize(grad):
     Feel free to redefine this function if you want different behaviors, e.g.,
         Merge small adjacent dims, say [64, 32, 3, 3] to [64, 32, 9];
         Reshape 1D vector to [1, d] or [d, 1] if you want dense-Q on vector. 
+    Do not use transpose, permute and movedim (otherwise, you need an _inverse_tensorize()). 
     """
     return grad.squeeze()
 
@@ -186,7 +185,8 @@ class KWNS4(torch.optim.Optimizer):
     A simplified version of wrapped_as_torch_optimizer_for_ddp.KWNS4/psgd.KronWhiten for single-GPU/DDP training. 
     Important tips:
         initial value lr_preconditioner=0.5 is too high and needs to anneal to ~0.1 (not too small as eps(bf16)~0.01);
-        initial value preconditioner_update_probability=1.0 is too high and needs to anneal to 0.01~0.1.  
+        initial value preconditioner_update_probability=1.0 is too high and needs to anneal to 0.01~0.1;
+        when loaded from a ckpt with fp32 param, the preconditioner may be upcasted to fp32 and need to restore to bf16.    
     """
     def __init__(
             self,
@@ -218,7 +218,7 @@ class KWNS4(torch.optim.Optimizer):
         assert weight_decay >= 0.0
         assert isinstance(decoupled_weight_decay, bool)
         assert grad_clip_max_amps[1] >= grad_clip_max_amps[0] >= 1.0 
-        assert 0.0 < preconditioner_update_probability <= 1.0
+        assert 0.0 <= preconditioner_update_probability <= 1.0
         assert resync_every > 0
 
         defaults = {
@@ -235,18 +235,17 @@ class KWNS4(torch.optim.Optimizer):
             "decoupled_weight_decay": decoupled_weight_decay,
             "grad_clip_max_amps": grad_clip_max_amps, 
             "preconditioner_update_probability": preconditioner_update_probability,
-            "resync_every": resync_every,
         }
         super().__init__(params, defaults)
 
         self._step = 0
+        self._resync_every = resync_every
 
         self.is_distributed = torch.distributed.is_available() and torch.distributed.is_initialized()
         if self.is_distributed: # if True, assume multi-GPU DDP training; important to sync the rng states
-            state = torch.get_rng_state().cuda() # assume nccl backend
-            torch.distributed.broadcast(state, src=0)
-            self.cpu_rng_state = state.cpu()
-
+            # state = torch.get_rng_state().cuda() # assume nccl backend
+            # torch.distributed.broadcast(state, src=0)
+            # self.cpu_rng_state = state.cpu()
             state = torch.cuda.get_rng_state().cuda() # assume nccl backend 
             torch.distributed.broadcast(state, src=0)
             self.cuda_rng_state = state.cpu()
@@ -259,17 +258,18 @@ class KWNS4(torch.optim.Optimizer):
                 loss = closure()
 
         if self.is_distributed: # sync internal rng states; save external rng states 
-            external_cpu_rng_state = torch.get_rng_state()
+            # external_cpu_rng_state = torch.get_rng_state()
+            # torch.set_rng_state(self.cpu_rng_state)
             external_cuda_rng_state = torch.cuda.get_rng_state()
-            torch.set_rng_state(self.cpu_rng_state)
             torch.cuda.set_rng_state(self.cuda_rng_state)
 
+        resync_state = self.is_distributed and ((self._step + 1) % self._resync_every == 0) # resync state flag; False at step=0
         for group in self.param_groups:
             momentum = group["momentum"]
             max_avg_amp, max_element_amp = group["grad_clip_max_amps"]
             prb = group["preconditioner_update_probability"]
             update_P = int(self._step * prb + 1) > int((self._step - 1) * prb + 1) # +1 so that update_P=True for step=0
-                
+            balance_Q = int(self._step * prb * 0.01) > int((self._step - 1) * prb * 0.01) # balance Q every 100 updates; False at step=0 
             for p in group["params"]:
                 grad = p.grad
                 if grad is None:
@@ -292,7 +292,7 @@ class KWNS4(torch.optim.Optimizer):
                                             max_skew=group["preconditioner_max_skew"])
                     state["step"] = 0
                 else:
-                    grad = grad.reshape(state["ema"].shape)
+                    grad = grad.reshape_as(state["ema"]) # memory_format=torch.channels_last Conv could break view_as
 
                 update_fn, apply_fn = _dispatch(state["QL"][0])
 
@@ -317,8 +317,13 @@ class KWNS4(torch.optim.Optimizer):
                 h.clamp_(min=-max_element_amp, max=max_element_amp) 
                 p.sub_(h.view_as(p), alpha=group["lr"])
 
-                # resync states occasionally if matmul is not deterministic and state divergence is large 
-                if self.is_distributed and (state["step"] % group["resync_every"] == 0):
+                # balance Q (optional); resync state occasionally if matmul is not deterministic (generally no need) 
+                # no need to compile/capture this part if you use torch.compile/cuda_graph 
+                if balance_Q:
+                    Q = state["QL"][0]
+                    if len(Q) > 1:
+                        _balance_n(Q)
+                if resync_state:
                     torch.distributed.broadcast(p, src=0)
                     torch.distributed.broadcast(state["ema"], src=0)
                     for q, ell in zip(*state["QL"]):
@@ -326,9 +331,9 @@ class KWNS4(torch.optim.Optimizer):
                         torch.distributed.broadcast(ell, src=0)
 
         if self.is_distributed: # save internal rng states; recover external rng states 
-            self.cpu_rng_state = torch.get_rng_state()
+            # self.cpu_rng_state = torch.get_rng_state()
+            # torch.set_rng_state(external_cpu_rng_state)
             self.cuda_rng_state = torch.cuda.get_rng_state()
-            torch.set_rng_state(external_cpu_rng_state)
             torch.cuda.set_rng_state(external_cuda_rng_state)
 
         self._step += 1

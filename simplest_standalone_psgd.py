@@ -4,7 +4,7 @@ Largely corresponds to psgd.KronWhiten with dQ=Q0p5EQ1p5, but with considerable 
     * Only consider 0/1/2D momentum whitening with real bfloat16 preconditioners. 
     * Higher order tensors are matricized (you can redefine _matricize()). 
     * Always diag preconditioner for 0/1D tensors; per-axis diag/matrix preconditioner for 2D tensors.  
-    * Einsum expressions are explicitly unrolled. 
+    * Einsum expressions are explicitly unrolled to avoid all its overhead. 
 """
 
 import torch
@@ -98,7 +98,7 @@ def update_diag(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
 
     term1 = Pg * Pg
     ell = term1.amax() + 1 # term2 = total_numel / Q0.numel() = 1
-    L[0].copy_(torch.maximum(betaL * L[0] + (1 - betaL) * ell, ell))
+    L[0].mul_(betaL).add_(ell, alpha=1 - betaL).clamp_(min=ell) # L[0].copy_(torch.maximum(betaL * L[0] + (1 - betaL) * ell, ell))
     Q0.mul_(1 - lr / L[0] * (term1 - 1))
 
 
@@ -115,20 +115,17 @@ def update_dense_dense(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
 
     term1 = Pg @ Pg.T
     ell = norm_lower_bound_spd(term1) + n
-    L[0].copy_(torch.maximum(betaL * L[0] + (1 - betaL) * ell, ell))
+    L[0].mul_(betaL).add_(ell, alpha=1 - betaL).clamp_(min=ell) # L[0].copy_(torch.maximum(betaL * L[0] + (1 - betaL) * ell, ell))
     term1.diagonal().sub_(n)
     Ql.sub_(lr / L[0] * (term1 @ Ql))
     procrustes_step2(Ql)
 
     term1 = Pg.T @ Pg
     ell = norm_lower_bound_spd(term1) + m
-    L[1].copy_(torch.maximum(betaL * L[1] + (1 - betaL) * ell, ell))
+    L[1].mul_(betaL).add_(ell, alpha=1 - betaL).clamp_(min=ell) # L[1].copy_(torch.maximum(betaL * L[1] + (1 - betaL) * ell, ell))
     term1.diagonal().sub_(m)
     Qr.sub_(lr / L[1] * (term1 @ Qr))
     procrustes_step2(Qr)
-
-    if torch.rand([]) < 0.01:
-        _balance_2(Ql, Qr)
 
 
 def update_dense_diag(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
@@ -145,18 +142,15 @@ def update_dense_diag(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
 
     term1 = Pg @ Pg.T
     ell = norm_lower_bound_spd(term1) + n
-    L[0].copy_(torch.maximum(betaL * L[0] + (1 - betaL) * ell, ell))
+    L[0].mul_(betaL).add_(ell, alpha=1 - betaL).clamp_(min=ell) # L[0].copy_(torch.maximum(betaL * L[0] + (1 - betaL) * ell, ell))
     term1.diagonal().sub_(n)
     Ql.sub_(lr / L[0] * (term1 @ Ql))
     procrustes_step2(Ql)
 
     term1 = torch.linalg.vector_norm(Pg, dim=0).square_() # (Pg * Pg).sum(dim=0)
     ell = term1.amax() + m
-    L[1].copy_(torch.maximum(betaL * L[1] + (1 - betaL) * ell, ell))
+    L[1].mul_(betaL).add_(ell, alpha=1 - betaL).clamp_(min=ell) # L[1].copy_(torch.maximum(betaL * L[1] + (1 - betaL) * ell, ell))
     Qr.mul_(1 - lr / L[1] * (term1 - m))
-
-    if torch.rand([]) < 0.01:
-        _balance_2(Ql, Qr)
 
 
 def update_diag_dense(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
@@ -173,18 +167,15 @@ def update_diag_dense(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
 
     term1 = torch.linalg.vector_norm(Pg, dim=1).square_() # (Pg * Pg).sum(dim=1)
     ell = term1.amax() + n
-    L[0].copy_(torch.maximum(betaL * L[0] + (1 - betaL) * ell, ell))
+    L[0].mul_(betaL).add_(ell, alpha=1 - betaL).clamp_(min=ell) # L[0].copy_(torch.maximum(betaL * L[0] + (1 - betaL) * ell, ell))
     Ql.mul_(1 - lr / L[0] * (term1 - n))
 
     term1 = Pg.T @ Pg
     ell = norm_lower_bound_spd(term1) + m
-    L[1].copy_(torch.maximum(betaL * L[1] + (1 - betaL) * ell, ell))
+    L[1].mul_(betaL).add_(ell, alpha=1 - betaL).clamp_(min=ell) # L[1].copy_(torch.maximum(betaL * L[1] + (1 - betaL) * ell, ell))
     term1.diagonal().sub_(m)
     Qr.sub_(lr / L[1] * (term1 @ Qr))
     procrustes_step2(Qr)
-
-    if torch.rand([]) < 0.01:
-        _balance_2(Ql, Qr)
 
 
 def update_diag_diag(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
@@ -201,16 +192,13 @@ def update_diag_diag(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
 
     term1 = Pg2.sum(dim=1)
     ell = term1.amax() + n
-    L[0].copy_(torch.maximum(betaL * L[0] + (1 - betaL) * ell, ell))
+    L[0].mul_(betaL).add_(ell, alpha=1 - betaL).clamp_(min=ell) # L[0].copy_(torch.maximum(betaL * L[0] + (1 - betaL) * ell, ell))
     Ql.mul_(1 - lr / L[0] * (term1 - n))
 
     term1 = Pg2.sum(dim=0)
     ell = term1.amax() + m
-    L[1].copy_(torch.maximum(betaL * L[1] + (1 - betaL) * ell, ell))
+    L[1].mul_(betaL).add_(ell, alpha=1 - betaL).clamp_(min=ell) # L[1].copy_(torch.maximum(betaL * L[1] + (1 - betaL) * ell, ell))
     Qr.mul_(1 - lr / L[1] * (term1 - m))
-
-    if torch.rand([]) < 0.01:
-        _balance_2(Ql, Qr)
 
 
 def apply_diag(QL, G):
@@ -281,6 +269,7 @@ def _matricize(grad):
     Feel free to redefine this function if you want different behaviors, e.g.,
         Reshape [d0, d1, d2, ...] to [d0, d1 * d2 * ...] (for CNN weights);
         Reshape 1D vector to [1, d0] or [d0, 1] (if you want dense-Q on vector). 
+    Do not use transpose, permute and movedim (otherwise, you need an _inverse_matricize()). 
     """
     grad = grad.squeeze()
     if grad.dim() <= 2:
@@ -308,7 +297,8 @@ class KWNS4(torch.optim.Optimizer):
     A simplified version of wrapped_as_torch_optimizer_for_ddp.KWNS4/psgd.KronWhiten for single-GPU/DDP training. 
     Important tips:
         initial value lr_preconditioner=0.5 is too high and needs to anneal to ~0.1 (not too small as eps(bf16)~0.01);
-        initial value preconditioner_update_probability=1.0 is too high and needs to anneal to 0.01~0.1.  
+        initial value preconditioner_update_probability=1.0 is too high and needs to anneal to 0.01~0.1;
+        when loaded from a ckpt with fp32 param, the preconditioner may be upcasted to fp32 and need to restore to bf16.   
     """
     def __init__(
             self,
@@ -340,7 +330,7 @@ class KWNS4(torch.optim.Optimizer):
         assert weight_decay >= 0.0
         assert isinstance(decoupled_weight_decay, bool)
         assert grad_clip_max_amps[1] >= grad_clip_max_amps[0] >= 1.0 
-        assert 0.0 < preconditioner_update_probability <= 1.0
+        assert 0.0 <= preconditioner_update_probability <= 1.0
         assert resync_every > 0
 
         defaults = {
@@ -357,18 +347,17 @@ class KWNS4(torch.optim.Optimizer):
             "decoupled_weight_decay": decoupled_weight_decay,
             "grad_clip_max_amps": grad_clip_max_amps, 
             "preconditioner_update_probability": preconditioner_update_probability,
-            "resync_every": resync_every,
         }
         super().__init__(params, defaults)
 
         self._step = 0
+        self._resync_every = resync_every
 
         self.is_distributed = torch.distributed.is_available() and torch.distributed.is_initialized()
         if self.is_distributed: # if True, assume multi-GPU DDP training; important to sync the rng states
-            state = torch.get_rng_state().cuda() # assume nccl backend
-            torch.distributed.broadcast(state, src=0)
-            self.cpu_rng_state = state.cpu()
-
+            # state = torch.get_rng_state().cuda() # assume nccl backend 
+            # torch.distributed.broadcast(state, src=0)
+            # self.cpu_rng_state = state.cpu()
             state = torch.cuda.get_rng_state().cuda() # assume nccl backend 
             torch.distributed.broadcast(state, src=0)
             self.cuda_rng_state = state.cpu()
@@ -381,17 +370,18 @@ class KWNS4(torch.optim.Optimizer):
                 loss = closure()
 
         if self.is_distributed: # sync internal rng states; save external rng states 
-            external_cpu_rng_state = torch.get_rng_state()
+            # external_cpu_rng_state = torch.get_rng_state()
+            # torch.set_rng_state(self.cpu_rng_state)
             external_cuda_rng_state = torch.cuda.get_rng_state()
-            torch.set_rng_state(self.cpu_rng_state)
             torch.cuda.set_rng_state(self.cuda_rng_state)
 
+        resync_state = self.is_distributed and ((self._step + 1) % self._resync_every == 0) # resync state flag; False at step=0
         for group in self.param_groups:
             momentum = group["momentum"]
-            max_avg_amp, max_element_amp = group["grad_clip_max_amps"]
+            max_avg_amp, max_element_amp = group["grad_clip_max_amps"]     
             prb = group["preconditioner_update_probability"]
             update_P = int(self._step * prb + 1) > int((self._step - 1) * prb + 1) # +1 so that update_P=True for step=0
-                
+            balance_Q = int(self._step * prb * 0.01) > int((self._step - 1) * prb * 0.01) # balance Q every 100 updates; False at step=0            
             for p in group["params"]:
                 grad = p.grad
                 if grad is None:
@@ -414,7 +404,7 @@ class KWNS4(torch.optim.Optimizer):
                                             max_skew=group["preconditioner_max_skew"])
                     state["step"] = 0
                 else:
-                    grad = grad.reshape(state["ema"].shape)
+                    grad = grad.reshape_as(state["ema"]) # memory_format=torch.channels_last Conv could break view_as
 
                 update_fn, apply_fn = _dispatch(state["QL"][0])
 
@@ -439,8 +429,13 @@ class KWNS4(torch.optim.Optimizer):
                 h.clamp_(min=-max_element_amp, max=max_element_amp) 
                 p.sub_(h.view_as(p), alpha=group["lr"])
 
-                # resync states occasionally if matmul is not deterministic and state divergence is large 
-                if self.is_distributed and (state["step"] % group["resync_every"] == 0):
+                # balance Q (optional); resync state occasionally if matmul is not deterministic (generally no need) 
+                # do not compile/capture this part if you use torch.compile/cuda_graph
+                if balance_Q:
+                    Q = state["QL"][0]
+                    if len(Q) > 1:
+                        _balance_2(*Q)
+                if resync_state:
                     torch.distributed.broadcast(p, src=0)
                     torch.distributed.broadcast(state["ema"], src=0)
                     for q, ell in zip(*state["QL"]):
@@ -448,9 +443,9 @@ class KWNS4(torch.optim.Optimizer):
                         torch.distributed.broadcast(ell, src=0)
 
         if self.is_distributed: # save internal rng states; recover external rng states 
-            self.cpu_rng_state = torch.get_rng_state()
+            # self.cpu_rng_state = torch.get_rng_state()
+            # torch.set_rng_state(external_cpu_rng_state)
             self.cuda_rng_state = torch.cuda.get_rng_state()
-            torch.set_rng_state(external_cpu_rng_state)
             torch.cuda.set_rng_state(external_cuda_rng_state)
 
         self._step += 1
