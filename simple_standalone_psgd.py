@@ -150,14 +150,18 @@ def apply_kron(QL, G):
     for i, q in enumerate(Q):
         if q.dim() < 2:
             s = q * q
-            Pg = Pg * s.view([1] * i + [-1] + [1] * (N - i - 1))
+            Pg = Pg * s.view([-1] + [1] * (N - i - 1))
         else:
-            Pg = Pg.movedim(i, 0)
-            n_i = Pg.shape[0]
-            rest = Pg.shape[1:]
-            flat = Pg.reshape(n_i, -1)
-            flat = torch.linalg.multi_dot([q.T, q, flat])
-            Pg = flat.view(n_i, *rest).movedim(0, i)
+            n_i = q.shape[0]
+            if i < N - 1:
+                Pg = Pg.movedim(i, 0) # for row-major data, moving i=>0 is cheaper than i=>-1
+                flat = Pg.reshape(n_i, -1)
+                flat = torch.linalg.multi_dot([q.T, q, flat])
+                Pg = flat.view_as(Pg).movedim(0, i)
+            else: # apply P on the last axis directly to save memory copy
+                flat = Pg.reshape(-1, n_i)
+                flat = torch.linalg.multi_dot([flat, q.T, q])
+                Pg = flat.view_as(Pg)
     return Pg
         
 
