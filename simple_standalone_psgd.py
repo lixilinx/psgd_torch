@@ -1,39 +1,48 @@
 """
 Simple dependency-free Kron momentum Whitening optimizer with NS iterations for inv 4th root of E[gg^T] (KWNS4).
 Largely corresponds to psgd.KronWhiten with dQ=Q0p5EQ1p5, but with some adaptations:
-    * Only real bfloat16 momentun whitening preconditioners. 
-    * Always diag preconditioner for 0/1D tensors; per-axis diag/matrix preconditioner for >=2D tensors.
-    * Einsum is replaced with matmul and multi_dot to avoid any overhead.   
-    * You can redefine _tensorize(), e.g., 1) merge small adjacent dims; 2) reshape vector to matrix to use dense preconditioner.   
+    1) Only real momentun whitening preconditioners. 
+    2) Always diag preconditioner for 0/1D tensors; per-axis diag/matrix preconditioner for >=2D tensors.
+    3) Einsum is replaced with matmul and multi_dot to avoid any overhead.   
+    4) You can redefine _tensorize(), e.g., 1) merge small adjacent dims; 2) reshape vector to matrix to use dense preconditioner.   
+    5) You can config module level settings (PRECONDITIONER_DTYPE, SUBSPACE_DIM, MIN_NORMAL, RELATIVE_DAMPING). Recommended settings are (see psgd.py):
+        (torch.bfloat16, 128, 2**-126, 2**-8)
+        (torch.float32, 32, 2**-126, 2**-24)
 """
 
 import torch
 
 
-def norm_lower_bound_spd(A, k=128, half_iters=2):
+PRECONDITIONER_DTYPE = torch.bfloat16 
+SUBSPACE_DIM = 128
+MIN_NORMAL = 2**-126
+RELATIVE_DAMPING = 2**-8
+
+
+def norm_lower_bound_spd(A, k=SUBSPACE_DIM, half_iters=2):
     """
-    A simplified version of psgd.norm_lower_bound_spd with plain random init (no centroid alignment). 
+    A simplified version of psgd.norm_lower_bound_spd with plain random init (no need of centroid alignment for k>10). 
     """
-    normalizing_factor = A.diagonal().amax() + 2**-126
+    normalizing_factor = A.diagonal().amax() + MIN_NORMAL
     A = A / normalizing_factor 
     V = torch.randn(k, A.shape[1], dtype=A.dtype, device=A.device)
     for _ in range(half_iters):
         V = V @ A 
-        V /= torch.linalg.vector_norm(V, dim=1, keepdim=True) + 2**-126
+        V /= torch.linalg.vector_norm(V, dim=1, keepdim=True) + MIN_NORMAL
         V = V @ A   
     return normalizing_factor * torch.amax(torch.linalg.vector_norm(V, dim=1))
 
 
-def norm_lower_bound_skh(A, k=128, half_iters=2):
+def norm_lower_bound_skh(A, k=SUBSPACE_DIM, half_iters=2):
     """
-    A simplified version of psgd.norm_lower_bound_skh with plain random init (no centroid alignment). 
+    A simplified version of psgd.norm_lower_bound_skh with plain random init (no need of centroid alignment for k>10). 
     """
-    normalizing_factor = A.abs().amax() + 2**-126
+    normalizing_factor = A.abs().amax() + MIN_NORMAL
     A = A / normalizing_factor  
     V = torch.randn(k, A.shape[1], dtype=A.dtype, device=A.device)
     for _ in range(half_iters):
         V = V @ A 
-        V /= torch.linalg.vector_norm(V, dim=1, keepdim=True) + 2**-126
+        V /= torch.linalg.vector_norm(V, dim=1, keepdim=True) + MIN_NORMAL
         V = V @ A   
     return normalizing_factor * torch.amax(torch.linalg.vector_norm(V, dim=1))
 
@@ -43,7 +52,7 @@ def procrustes_step2(Q, max_step_size=1/8):
     A simplified version of psgd.procrustes_step2 just for real matrices. 
     """
     R = Q.T - Q 
-    R /= norm_lower_bound_skh(R) + 2**-126 
+    R /= norm_lower_bound_skh(R) + MIN_NORMAL 
     RQ = R @ Q
     RRQ = R @ RQ
     tr_RQ = RQ.diagonal().sum() # trace not implemented for CPU bf16 matrix
@@ -91,7 +100,7 @@ def update_diag(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
     Q, L = QL
     Q0 = Q[0]
 
-    Gd = G + (damping + 2**-8 * G.abs()) * torch.randn_like(G) # 2**-8 = eps(bf16)/2
+    Gd = G + (damping + RELATIVE_DAMPING * G.abs()) * torch.randn_like(G) 
 
     Pg = Q0 * Q0 * Gd
 
@@ -110,7 +119,7 @@ def update_kron(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
     N = G.dim()
     total_numel = G.numel()
 
-    Gd = G + (damping + 2**-8 * G.abs()) * torch.randn_like(G) # 2**-8 = eps(bf16)/2
+    Gd = G + (damping + RELATIVE_DAMPING * G.abs()) * torch.randn_like(G) 
     Pg = apply_kron(QL, Gd)
     for i, q in enumerate(Q):
         n_i = q.shape[0]
@@ -188,9 +197,9 @@ class KWNS4(torch.optim.Optimizer):
     """
     A simplified version of wrapped_as_torch_optimizer_for_ddp.KWNS4/psgd.KronWhiten for single-GPU/DDP training. 
     Important tips:
-        initial value lr_preconditioner=0.5 is too high and needs to anneal to ~0.1 (not too small as eps(bf16)~0.01);
+        initial value lr_preconditioner=0.5 is too high and needs to anneal to ~0.1 (not too small for bf16 as eps(bf16)~0.01);
         initial value preconditioner_update_probability=1.0 is too high and needs to anneal to 0.01~0.1;
-        when loaded from a ckpt with fp32 param, the preconditioner may be upcasted to fp32 and need to restore to bf16.    
+        when loaded from a ckpt with fp32 param, a bf16 preconditioner may be upcasted to fp32 and need to restore to bf16.    
     """
     def __init__(
             self,
@@ -199,7 +208,7 @@ class KWNS4(torch.optim.Optimizer):
             preconditioner_max_skew=1.0, # for >=2D tensor: 0.0 => all diagonal Q; inf => all dense Q
             preconditioner_init_scale=1.0, # P0 = preconditioner_init_scale^2 * I; set to smaller values if unsure
             lr=3e-4, # the lr_params in PSGD; PSGD has two lrs 
-            lr_preconditioner=0.5, # Quickly anneal down to ~ 0.1; don't anneal to ~ 0.01 as eps(bf16) ~ 0.01    
+            lr_preconditioner=0.5, # Quickly anneal down to ~ 0.1; don't anneal to ~ 0.01 for bf16 as eps(bf16) ~ 0.01    
             betaL=0.9, # larger/smaller betaL => longer/shorter history of momentums for whitening
             damping=1e-9, # roughly the eps in Adam(W) 
             momentum=0.9, # roughly the beta1 in Adam(W)
@@ -290,7 +299,7 @@ class KWNS4(torch.optim.Optimizer):
                 if len(state) == 0: # initialization
                     grad = _tensorize(grad)
                     state["ema"] = torch.zeros_like(grad)
-                    state["QL"] = init_kron(grad.to(torch.bfloat16), 
+                    state["QL"] = init_kron(grad.to(PRECONDITIONER_DTYPE), 
                                             Scale=group["preconditioner_init_scale"], 
                                             max_size=group["preconditioner_max_size"], 
                                             max_skew=group["preconditioner_max_skew"])
@@ -306,9 +315,9 @@ class KWNS4(torch.optim.Optimizer):
                 state["step"] += 1
 
                 if group["nesterov"]: # transfer fn propto: m/(1 - m*z^{-1}) + 1
-                    update = grad.lerp(state["ema"], beta).to(torch.bfloat16) # beta * state["ema"] + (1.0 - beta) * grad 
+                    update = grad.lerp(state["ema"], beta).to(PRECONDITIONER_DTYPE) # beta * state["ema"] + (1.0 - beta) * grad 
                 else: # transfer fn propto: 1/(1 - m*z^{-1}); less high frequency 
-                    update = state["ema"].to(torch.bfloat16)
+                    update = state["ema"].to(PRECONDITIONER_DTYPE)
 
                 if update_P:
                     update_fn(state["QL"], update, 
