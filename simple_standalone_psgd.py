@@ -1,5 +1,5 @@
 """
-Simple dependency-free Kron momentum Whitening optimizer with NS iterations for inv 4th root of E[gg^T] (KWNS4).
+Simple dependency-free Kron momentum Whitening optimizer with PSGD style NS iterations for inv 4th root of E[gg^T] (KWNS4).
 Largely corresponds to psgd.KronWhiten with dQ=Q0p5EQ1p5, but with some adaptations:
     1) Only real momentun whitening preconditioners. 
     2) Always diag preconditioner for 0/1D tensors; per-axis diag/matrix preconditioner for >=2D tensors.
@@ -19,9 +19,9 @@ MIN_NORMAL = 2**-126
 RELATIVE_DAMPING = 2**-8
 
 
-def norm_lower_bound_spd(A, k=SUBSPACE_DIM, half_iters=2):
+def norm_lower_bound_spd(A, k, half_iters=2):
     """
-    A simplified version of psgd.norm_lower_bound_spd with plain random init (no need of centroid alignment for k>10). 
+    A simplified version of psgd.norm_lower_bound_spd with plain random init (no need of centroid alignment for subspace dim k>10). 
     """
     normalizing_factor = A.diagonal().amax() + MIN_NORMAL
     A = A / normalizing_factor 
@@ -33,9 +33,9 @@ def norm_lower_bound_spd(A, k=SUBSPACE_DIM, half_iters=2):
     return normalizing_factor * torch.amax(torch.linalg.vector_norm(V, dim=1))
 
 
-def norm_lower_bound_skh(A, k=SUBSPACE_DIM, half_iters=2):
+def norm_lower_bound_skh(A, k, half_iters=2):
     """
-    A simplified version of psgd.norm_lower_bound_skh with plain random init (no need of centroid alignment for k>10). 
+    A simplified version of psgd.norm_lower_bound_skh with plain random init (no need of centroid alignment for subspace dim k>10). 
     """
     normalizing_factor = A.abs().amax() + MIN_NORMAL
     A = A / normalizing_factor  
@@ -52,7 +52,7 @@ def procrustes_step2(Q, max_step_size=1/8):
     A simplified version of psgd.procrustes_step2 just for real matrices. 
     """
     R = Q.T - Q 
-    R /= norm_lower_bound_skh(R) + MIN_NORMAL 
+    R /= norm_lower_bound_skh(R, k=SUBSPACE_DIM) + MIN_NORMAL 
     RQ = R @ Q
     RRQ = R @ RQ
     tr_RQ = RQ.diagonal().sum() # trace not implemented for CPU bf16 matrix
@@ -133,7 +133,7 @@ def update_kron(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
         else:
             flat = Pg.movedim(i, 0).reshape(n_i, -1)
             term1 = flat @ flat.T 
-            ell = norm_lower_bound_spd(term1) + term2
+            ell = norm_lower_bound_spd(term1, k=SUBSPACE_DIM) + term2
             L[i].mul_(betaL).add_(ell, alpha=1 - betaL).clamp_(min=ell) # L[i].copy_(torch.maximum(betaL * L[i] + (1 - betaL) * ell, ell))
             term1.diagonal().sub_(term2)
             q.sub_(lr / L[i] * (term1 @ q))
@@ -151,7 +151,7 @@ def apply_diag(QL, G):
 def apply_kron(QL, G):
     """
     A plain implementation of psgd.precond_grad_kron with matmul, no einsum. 
-    No universal best einsum implementation. The one here is simple and not bad.  
+    No universal best einsum implementation. The one here is simple and generally faster than bmm, tensordot and einsum.  
     """
     Q = QL[0]
     N = G.dim()
@@ -188,7 +188,7 @@ def _tensorize(grad):
     Feel free to redefine this function if you want different behaviors, e.g.,
         Merge small adjacent dims, say [64, 32, 3, 3] to [64, 32, 9];
         Reshape 1D vector to [1, d] or [d, 1] if you want dense-Q on vector. 
-    Do not use transpose, permute and movedim (otherwise, you need an _inverse_tensorize()). 
+    Do not use transpose, permute or movedim (otherwise, you need an _inverse_tensorize()). 
     """
     return grad.squeeze()
 

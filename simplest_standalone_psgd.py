@@ -1,5 +1,5 @@
 """
-Simplest dependency-free Kron momentum Whitening optimizer with NS iterations for inv 4th root of E[gg^T] (KWNS4).
+Simplest dependency-free Kron momentum Whitening optimizer with PSGD style NS iterations for inv 4th root of E[gg^T] (KWNS4).
 Largely corresponds to psgd.KronWhiten with dQ=Q0p5EQ1p5, but with considerable simplifications:
     1) Only consider 0/1/2D momentum whitening with real preconditioners. 
     2) Higher order tensors are matricized (you can redefine _matricize()). 
@@ -19,9 +19,9 @@ MIN_NORMAL = 2**-126
 RELATIVE_DAMPING = 2**-8
 
 
-def norm_lower_bound_spd(A, k=SUBSPACE_DIM, half_iters=2):
+def norm_lower_bound_spd(A, k, half_iters=2):
     """
-    A simplified version of psgd.norm_lower_bound_spd with plain random init (no need of centroid alignment for k>10). 
+    A simplified version of psgd.norm_lower_bound_spd with plain random init (no need of centroid alignment for subspace dim k>10). 
     """
     normalizing_factor = A.diagonal().amax() + MIN_NORMAL
     A = A / normalizing_factor 
@@ -33,9 +33,9 @@ def norm_lower_bound_spd(A, k=SUBSPACE_DIM, half_iters=2):
     return normalizing_factor * torch.amax(torch.linalg.vector_norm(V, dim=1))
 
 
-def norm_lower_bound_skh(A, k=SUBSPACE_DIM, half_iters=2):
+def norm_lower_bound_skh(A, k, half_iters=2):
     """
-    A simplified version of psgd.norm_lower_bound_skh with plain random init (no need of centroid alignment for k>10). 
+    A simplified version of psgd.norm_lower_bound_skh with plain random init (no need of centroid alignment for subspace dim k>10). 
     """
     normalizing_factor = A.abs().amax() + MIN_NORMAL
     A = A / normalizing_factor  
@@ -52,7 +52,7 @@ def procrustes_step2(Q, max_step_size=1/8):
     A simplified version of psgd.procrustes_step2 just for real matrices. 
     """
     R = Q.T - Q 
-    R /= norm_lower_bound_skh(R) + MIN_NORMAL 
+    R /= norm_lower_bound_skh(R, k=SUBSPACE_DIM) + MIN_NORMAL 
     RQ = R @ Q
     RRQ = R @ RQ
     tr_RQ = RQ.diagonal().sum() # trace not implemented for CPU bf16 matrix
@@ -123,14 +123,14 @@ def update_dense_dense(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
     Pg = torch.linalg.multi_dot([Ql.T, Ql, Gd, Qr.T, Qr])
 
     term1 = Pg @ Pg.T
-    ell = norm_lower_bound_spd(term1) + n
+    ell = norm_lower_bound_spd(term1, k=SUBSPACE_DIM) + n
     L[0].mul_(betaL).add_(ell, alpha=1 - betaL).clamp_(min=ell) # L[0].copy_(torch.maximum(betaL * L[0] + (1 - betaL) * ell, ell))
     term1.diagonal().sub_(n)
     Ql.sub_(lr / L[0] * (term1 @ Ql))
     procrustes_step2(Ql)
 
     term1 = Pg.T @ Pg
-    ell = norm_lower_bound_spd(term1) + m
+    ell = norm_lower_bound_spd(term1, k=SUBSPACE_DIM) + m
     L[1].mul_(betaL).add_(ell, alpha=1 - betaL).clamp_(min=ell) # L[1].copy_(torch.maximum(betaL * L[1] + (1 - betaL) * ell, ell))
     term1.diagonal().sub_(m)
     Qr.sub_(lr / L[1] * (term1 @ Qr))
@@ -150,7 +150,7 @@ def update_dense_diag(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
     Pg = Pg * (Qr * Qr)
 
     term1 = Pg @ Pg.T
-    ell = norm_lower_bound_spd(term1) + n
+    ell = norm_lower_bound_spd(term1, k=SUBSPACE_DIM) + n
     L[0].mul_(betaL).add_(ell, alpha=1 - betaL).clamp_(min=ell) # L[0].copy_(torch.maximum(betaL * L[0] + (1 - betaL) * ell, ell))
     term1.diagonal().sub_(n)
     Ql.sub_(lr / L[0] * (term1 @ Ql))
@@ -180,7 +180,7 @@ def update_diag_dense(QL, G, lr=0.1, betaL=0.9, damping=1e-9):
     Ql.mul_(1 - lr / L[0] * (term1 - n))
 
     term1 = Pg.T @ Pg
-    ell = norm_lower_bound_spd(term1) + m
+    ell = norm_lower_bound_spd(term1, k=SUBSPACE_DIM) + m
     L[1].mul_(betaL).add_(ell, alpha=1 - betaL).clamp_(min=ell) # L[1].copy_(torch.maximum(betaL * L[1] + (1 - betaL) * ell, ell))
     term1.diagonal().sub_(m)
     Qr.sub_(lr / L[1] * (term1 @ Qr))
@@ -278,7 +278,7 @@ def _matricize(grad):
     Feel free to redefine this function if you want different behaviors, e.g.,
         Reshape [d0, d1, d2, ...] to [d0, d1 * d2 * ...] (for CNN weights);
         Reshape 1D vector to [1, d0] or [d0, 1] (if you want dense-Q on vector). 
-    Do not use transpose, permute and movedim (otherwise, you need an _inverse_matricize()). 
+    Do not use transpose, permute or movedim (otherwise, you need an _inverse_matricize()). 
     """
     grad = grad.squeeze()
     if grad.dim() <= 2:
